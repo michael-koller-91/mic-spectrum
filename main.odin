@@ -15,46 +15,65 @@ import "core:time"
 import ma "vendor:miniaudio"
 import rl "vendor:raylib"
 
+CHAN_CAPACITY :: 10
+FRAME_COUNT :: 1102
 NUM_CHANNELS :: 2 // TODO: get this info from device
 NUM_THREADS :: 1
-SAMPLE_RATE :: 44100
+SAMPLE_RATE :: 44100 // TODO: get this info from device?
 WINDOW_HEIGHT :: 600
 WINDOW_WIDTH :: 800
 
-ChanType :: []f32
+ChanTypeCallback :: []f32 // from capture callback to task thread
+ChanTypeMain :: []f32 // from task thread to main
+
 
 Task_Data :: struct {
-	chan: chan.Chan(ChanType),
+	chan_callback: chan.Chan(ChanTypeCallback),
+	chan_main:     chan.Chan(ChanTypeMain),
 }
 
 UserData :: struct {
-	ring_buffer: ^ma.pcm_rb,
-	chan:        chan.Chan(ChanType),
+	chan_callback: chan.Chan(ChanTypeCallback),
 }
 
 proc_data :: proc(task: thread.Task) {
-	fmt.printfln("[TASK(%v)] starting", task.user_index)
+	fmt.printfln("[TASK(%v)] start working", task.user_index)
+	defer fmt.printfln("[TASK(%v)] stop working", task.user_index)
 
 	task_data := cast(^Task_Data)task.data
-	chan_rec := task_data^.chan
+	chan_recv := chan.as_recv(task_data^.chan_callback)
+	chan_send := chan.as_send(task_data^.chan_main)
+	i := 0
+	accu := make([]f32, 10 * FRAME_COUNT)
 	for {
-		arr, ok := chan.recv(chan_rec)
-		if len(arr) > 0 {
-			fmt.printfln(
-				"[Task(%v)] received len(arr) = %v | arr[0] = %v | len(chan_rec) = %v",
-				task.user_index,
-				len(arr),
-				arr[0],
-				chan.len(chan_rec),
-			)
-		}
+		arr, ok := chan.recv(chan_recv)
 		if !ok {
-			fmt.printfln("[Task(%v)] channel is closed", task.user_index)
+			fmt.printfln("[Task(%v)] chan_callback is closed", task.user_index)
 			break
 		}
+		defer delete(arr)
+		// accumulate frames
+		copy(accu[i * FRAME_COUNT:(i + 1) * FRAME_COUNT], arr)
+		i += 1
+		if i == 10 {
+			i = 0
+			// send a copy
+			accu_c := make([]f32, len(accu))
+			copy(accu_c, accu)
+			if chan.len(chan_send) < CHAN_CAPACITY - 2 {
+				success := chan.send(chan_send, accu_c)
+				if !success {
+					fmt.eprintfln(
+						"[Task(%v)]: ERROR: Failed to send to chan_send.",
+						task.user_index,
+					)
+					os.exit(1)
+				}
+			} else {
+				fmt.printfln("[Task(%v)]: dropped data", task.user_index)
+			}
+		}
 	}
-
-	fmt.printfln("[TASK(%v)] stopping", task.user_index)
 }
 
 device_start :: proc(device: ^ma.device) {
@@ -78,57 +97,20 @@ capture_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_c
 
 	data_ptr: rawptr
 	user_data := cast(^UserData)device.pUserData
-	ring_buffer := user_data.ring_buffer
-	send_chan := chan.as_send(user_data.chan)
+	chan_send := chan.as_send(user_data.chan_callback)
 
-	arr := make([]f32, 1102)
-
-	// capture samples and write to a ring buffer
-	frames_written: u32 = 0
-	for frames_written < frame_count {
-		frames_to_write := frame_count - frames_written
-
-		if frames_to_write < 0 {
-			break
+	if frame_count > 0 {
+		if chan.len(chan_send) < CHAN_CAPACITY - 1 {
+			arr := make([]f32, FRAME_COUNT)
+			mem.copy(raw_data(arr), input, int(frame_count) * size_of(f32))
+			success := chan.send(chan_send, arr)
+			if !success {
+				fmt.eprintln("ERROR: capture_callback: Failed to send to chan_send.")
+				os.exit(1)
+			}
+		} else {
+			fmt.println("capture_callback: dropped frames")
 		}
-
-		result := ma.pcm_rb_acquire_write(ring_buffer, &frames_to_write, &data_ptr)
-		if result != .SUCCESS {
-			ma.log_postf(
-				ma.device_get_log(device),
-				u32(ma.log_level.LOG_LEVEL_ERROR),
-				"Failed to acquire capture PCM frames from ring buffer: %i",
-				result,
-			)
-			break
-		}
-
-		if frames_to_write == 0 {
-			break
-		}
-
-		// copy the data from capture buffer to ring buffer
-		ma.copy_pcm_frames(data_ptr, input, u64(frames_to_write), ma.format.f32, NUM_CHANNELS)
-		result = ma.pcm_rb_commit_write(ring_buffer, frames_to_write)
-		if result != .SUCCESS {
-			ma.log_postf(
-				ma.device_get_log(device),
-				u32(ma.log_level.LOG_LEVEL_ERROR),
-				"Failed to commit capture PCM frames to ring buffer: %i",
-				result,
-			)
-			break
-		}
-
-		// arr[0] = f32(input[0])
-		//copy(arr, mem.slice_ptr((^f32)(input), 10), 4)
-		mem.copy(raw_data(arr), input, 4)
-		success := chan.send(send_chan, arr)
-		if !success {
-			os.exit(1)
-		}
-
-		frames_written += frames_to_write
 	}
 }
 
@@ -206,7 +188,7 @@ main :: proc() {
 	rl_fps: i32 = 30
 
 	/* ------------------------- FFT related ------------------------- */
-	n_fft := 4096
+	n_fft := 10 * FRAME_COUNT
 	magnitude_max: f32 = math.F32_MIN
 	magnitude_min: f32 = math.F32_MAX
 	magnitude := make([]f32, n_fft)
@@ -221,9 +203,18 @@ main :: proc() {
 	}
 
 	/* ------------------------- thread related ------------------------- */
-	channel, err := chan.create(chan.Chan(ChanType), context.allocator)
-	assert(err == .None)
-	defer chan.destroy(channel)
+	chan_callback, err_callback := chan.create(
+		chan.Chan(ChanTypeCallback),
+		CHAN_CAPACITY,
+		context.allocator,
+	)
+	assert(err_callback == .None)
+	defer chan.destroy(chan_callback)
+
+	chan_main, err_main := chan.create(chan.Chan(ChanTypeMain), CHAN_CAPACITY, context.allocator)
+	assert(err_main == .None)
+	defer chan.destroy(chan_main)
+	chan_recv := chan.as_recv(chan_main)
 
 	pool: thread.Pool
 	thread.pool_init(&pool, context.allocator, NUM_THREADS)
@@ -232,7 +223,8 @@ main :: proc() {
 	task_data: [NUM_THREADS]Task_Data
 	for i in 0 ..< NUM_THREADS {
 		task_data[i] = {
-			chan = channel,
+			chan_callback = chan_callback,
+			chan_main     = chan_main,
 		}
 		thread.pool_add_task(&pool, context.allocator, proc_data, &task_data[i], i)
 	}
@@ -258,25 +250,19 @@ main :: proc() {
 	defer ma.device_uninit(&capture_device)
 	defer log.debug("Uninitialized capture_device")
 
-	capture_period_frames := capture_device.capture.internalPeriodSizeInFrames
-	buffer_size_in_frames := capture_period_frames * 40 * 30 // probably about 30 seconds
-	ring_buffer: ma.pcm_rb
-	result = ma.pcm_rb_init(.f32, NUM_CHANNELS, buffer_size_in_frames, nil, nil, &ring_buffer)
-	if result != .SUCCESS {
-		fmt.eprintln("Failed to initialize ring_buffer:", result)
-		os.exit(1)
-	}
-	log.debug("Initialized ring_buffer")
-	defer ma.pcm_rb_uninit(&ring_buffer)
-	defer log.debug("Uninitialized ring_buffer")
-
-	ma.pcm_rb_set_sample_rate(&ring_buffer, capture_device.sampleRate)
+	frame_count := capture_device.capture.internalPeriodSizeInFrames
+	fmt.println("frame_count:", frame_count)
 
 	user_data: UserData
-	user_data.ring_buffer = &ring_buffer
-	user_data.chan = channel
+	user_data.chan_callback = chan_callback
 
 	capture_device.pUserData = &user_data
+
+	// When device is started for the first time, it outputs ones followed by minus ones.
+	// By briefly starting the device here, we skip this initialization phase.
+	device_start(&capture_device)
+	time.sleep(2_000_000)
+	device_stop(&capture_device)
 
 	/* ------------------------- rl related ------------------------- */
 	spec_x: i32 = 30
@@ -317,29 +303,34 @@ main :: proc() {
 			device_stop(&capture_device)
 		}
 
-		magnitude_max = math.F32_MIN
-		magnitude_min = math.F32_MAX
-		for &m, i in magnitude {
-			m = rand.float32_normal(0, 0.05) + math.sin_f32(2.0 * math.PI * f32(i) / 500)
-			if m < magnitude_min {
-				magnitude_min = m
-			}
-			if m > magnitude_max {
-				magnitude_max = m
-			}
-		}
+		arr, ok := chan.try_recv(chan_recv)
+		// defer delete(arr)
+		if ok {
+			magnitude = arr
 
-		map_to_rec(
-			&magnitude,
-			plot_line_pts,
-			plot_line_pts_count,
-			plot_pixels,
-			0,
-			f32(len(magnitude)),
-			-1.1,
-			1.1,
-			spec_rec,
-		)
+			magnitude_max = math.F32_MIN
+			magnitude_min = math.F32_MAX
+			for &m in magnitude {
+				if m < magnitude_min {
+					magnitude_min = m
+				}
+				if m > magnitude_max {
+					magnitude_max = m
+				}
+			}
+
+			map_to_rec(
+				&magnitude,
+				plot_line_pts,
+				plot_line_pts_count,
+				plot_pixels,
+				0,
+				f32(len(magnitude)),
+				-5, //magnitude_min,
+				5, //magnitude_max,
+				spec_rec,
+			)
+		}
 
 		rl.BeginDrawing()
 		{
@@ -370,6 +361,7 @@ main :: proc() {
 		}
 		rl.EndDrawing()
 	}
-	chan.close(channel)
+	chan.close(chan_callback)
+	chan.close(chan_main)
 	thread.pool_finish(&pool)
 }
