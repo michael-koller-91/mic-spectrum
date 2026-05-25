@@ -15,8 +15,9 @@ import "core:time"
 import ma "vendor:miniaudio"
 import rl "vendor:raylib"
 
-CHAN_CAPACITY :: 10
-FRAME_COUNT :: 1102
+CHAN_CAPACITY :: 5
+FFT_SIZE_R :: 4096 * 2
+FFT_SIZE_C :: FFT_SIZE_R / 2 + 1
 NUM_CHANNELS :: 2 // TODO: get this info from device
 NUM_THREADS :: 1
 SAMPLE_RATE :: 44100 // TODO: get this info from device?
@@ -26,14 +27,69 @@ WINDOW_WIDTH :: 800
 ChanTypeCallback :: []f32 // from capture callback to task thread
 ChanTypeMain :: []f32 // from task thread to main
 
-
 Task_Data :: struct {
 	chan_callback: chan.Chan(ChanTypeCallback),
 	chan_main:     chan.Chan(ChanTypeMain),
+	frame_count:   u32,
 }
 
-UserData :: struct {
+User_Data :: struct {
 	chan_callback: chan.Chan(ChanTypeCallback),
+}
+
+Ring_Buffer :: struct {
+	data:  []f32,
+	head:  int, // index of slot where to write next
+	tail:  int, // index of slot where to read next
+	count: int, // number of items in the buffer
+}
+
+rb_init :: proc(rb: ^Ring_Buffer, cap: int) {
+	rb.data = make([]f32, cap)
+	rb.head = 0
+	rb.tail = 0
+	rb.count = 0
+}
+
+rb_push :: proc(rb: ^Ring_Buffer, item: f32) {
+	rb.data[rb.head] = item
+	rb.head += 1
+	if rb.head == len(rb.data) {
+		rb.head = 0
+	}
+	rb.count += 1
+}
+
+rb_pop :: proc(rb: ^Ring_Buffer) -> (item: f32) {
+	item = rb.data[rb.tail]
+	rb.tail += 1
+	if rb.tail == len(rb.data) {
+		rb.tail = 0
+	}
+	rb.count -= 1
+	return
+}
+
+rb_empty_slots :: proc(rb: ^Ring_Buffer) -> int {
+	return len(rb.data) - rb.count
+}
+
+rb_append :: proc(rb: ^Ring_Buffer, arr: ^[]f32) -> (success: bool) {
+	success = false
+	sample_count := len(arr) / NUM_CHANNELS
+	if rb_empty_slots(rb) < sample_count {
+		return
+	}
+	for i in 0 ..< sample_count {
+		average: f32 = 0
+		// average accross the channels
+		for j in 0 ..< NUM_CHANNELS {
+			average += arr[i * NUM_CHANNELS + j] / NUM_CHANNELS
+		}
+		rb_push(rb, average)
+	}
+	success = true
+	return
 }
 
 proc_data :: proc(task: thread.Task) {
@@ -41,10 +97,21 @@ proc_data :: proc(task: thread.Task) {
 	defer fmt.printfln("[TASK(%v)] stop working", task.user_index)
 
 	task_data := cast(^Task_Data)task.data
-	chan_recv := chan.as_recv(task_data^.chan_callback)
-	chan_send := chan.as_send(task_data^.chan_main)
-	i := 0
-	accu := make([]f32, 10 * FRAME_COUNT)
+	chan_recv := chan.as_recv(task_data.chan_callback)
+	chan_send := chan.as_send(task_data.chan_main)
+	frame_count := int(task_data.frame_count)
+
+	buf_x := make([^]f32, FFT_SIZE_R)
+	buf_X := make([^]fftw3.fftwf_complex, FFT_SIZE_C)
+	defer free(buf_x)
+	defer free(buf_X)
+
+	plan_forward := fftw3.fftwf_plan_dft_r2c_1d(FFT_SIZE_R, buf_x, buf_X, fftw3.Flags.ESTIMATE)
+	defer fftw3.fftwf_destroy_plan(plan_forward)
+
+	rb := &Ring_Buffer{}
+	rb_init(rb, 3 * FFT_SIZE_R)
+
 	for {
 		arr, ok := chan.recv(chan_recv)
 		if !ok {
@@ -52,16 +119,26 @@ proc_data :: proc(task: thread.Task) {
 			break
 		}
 		defer delete(arr)
-		// accumulate frames
-		copy(accu[i * FRAME_COUNT:(i + 1) * FRAME_COUNT], arr)
-		i += 1
-		if i == 10 {
-			i = 0
-			// send a copy
-			accu_c := make([]f32, len(accu))
-			copy(accu_c, accu)
+
+		could_append := rb_append(rb, &arr)
+		if !could_append {
+			fmt.printfln("[Task(%v)]: ring-buffer too full, dropped data", task.user_index)
+		}
+
+		if rb.count > FFT_SIZE_R {
+			for i in 0 ..< FFT_SIZE_R {
+				buf_x[i] = rb_pop(rb)
+			}
+
+			fftw3.fftwf_execute_dft_r2c(plan_forward, buf_x, buf_X)
+
+			to_send := make([]f32, FFT_SIZE_C)
+			for i in 0 ..< FFT_SIZE_C {
+				to_send[i] = fftw3.abs(buf_X[i])
+			}
+
 			if chan.len(chan_send) < CHAN_CAPACITY - 2 {
-				success := chan.send(chan_send, accu_c)
+				success := chan.send(chan_send, to_send)
 				if !success {
 					fmt.eprintfln(
 						"[Task(%v)]: ERROR: Failed to send to chan_send.",
@@ -96,12 +173,12 @@ capture_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_c
 	context = runtime.default_context()
 
 	data_ptr: rawptr
-	user_data := cast(^UserData)device.pUserData
+	user_data := cast(^User_Data)device.pUserData
 	chan_send := chan.as_send(user_data.chan_callback)
 
 	if frame_count > 0 {
 		if chan.len(chan_send) < CHAN_CAPACITY - 1 {
-			arr := make([]f32, FRAME_COUNT)
+			arr := make([]f32, frame_count)
 			mem.copy(raw_data(arr), input, int(frame_count) * size_of(f32))
 			success := chan.send(chan_send, arr)
 			if !success {
@@ -188,10 +265,9 @@ main :: proc() {
 	rl_fps: i32 = 30
 
 	/* ------------------------- FFT related ------------------------- */
-	n_fft := 10 * FRAME_COUNT
 	magnitude_max: f32 = math.F32_MIN
 	magnitude_min: f32 = math.F32_MAX
-	magnitude := make([]f32, n_fft)
+	magnitude := make([]f32, FFT_SIZE_C)
 	for &m in magnitude {
 		m = rand.float32_normal(0, 1)
 		if m < magnitude_min {
@@ -202,7 +278,7 @@ main :: proc() {
 		}
 	}
 
-	/* ------------------------- thread related ------------------------- */
+	/* ------------------------- channel related ------------------------- */
 	chan_callback, err_callback := chan.create(
 		chan.Chan(ChanTypeCallback),
 		CHAN_CAPACITY,
@@ -215,21 +291,6 @@ main :: proc() {
 	assert(err_main == .None)
 	defer chan.destroy(chan_main)
 	chan_recv := chan.as_recv(chan_main)
-
-	pool: thread.Pool
-	thread.pool_init(&pool, context.allocator, NUM_THREADS)
-	defer thread.pool_destroy(&pool)
-
-	task_data: [NUM_THREADS]Task_Data
-	for i in 0 ..< NUM_THREADS {
-		task_data[i] = {
-			chan_callback = chan_callback,
-			chan_main     = chan_main,
-		}
-		thread.pool_add_task(&pool, context.allocator, proc_data, &task_data[i], i)
-	}
-
-	thread.pool_start(&pool)
 
 	/* ------------------------- ma related ------------------------- */
 	result: ma.result
@@ -253,7 +314,7 @@ main :: proc() {
 	frame_count := capture_device.capture.internalPeriodSizeInFrames
 	fmt.println("frame_count:", frame_count)
 
-	user_data: UserData
+	user_data: User_Data
 	user_data.chan_callback = chan_callback
 
 	capture_device.pUserData = &user_data
@@ -263,6 +324,23 @@ main :: proc() {
 	device_start(&capture_device)
 	time.sleep(2_000_000)
 	device_stop(&capture_device)
+
+	/* ------------------------- thread related ------------------------- */
+	pool: thread.Pool
+	thread.pool_init(&pool, context.allocator, NUM_THREADS)
+	defer thread.pool_destroy(&pool)
+
+	task_data: [NUM_THREADS]Task_Data
+	for i in 0 ..< NUM_THREADS {
+		task_data[i] = {
+			chan_callback = chan_callback,
+			chan_main     = chan_main,
+			frame_count   = frame_count,
+		}
+		thread.pool_add_task(&pool, context.allocator, proc_data, &task_data[i], i)
+	}
+
+	thread.pool_start(&pool)
 
 	/* ------------------------- rl related ------------------------- */
 	spec_x: i32 = 30
@@ -276,7 +354,7 @@ main :: proc() {
 
 	plot_line_pts_count := i32(spec_rec.width)
 	plot_line_pts := make([^]rl.Vector2, plot_line_pts_count)
-	plot_pixels := make([^]rl.Vector2, n_fft)
+	plot_pixels := make([^]rl.Vector2, FFT_SIZE_C)
 
 	rl.InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Mic-Waterfall")
 	defer rl.CloseWindow()
@@ -325,9 +403,9 @@ main :: proc() {
 				plot_line_pts_count,
 				plot_pixels,
 				0,
-				f32(len(magnitude)),
-				-5, //magnitude_min,
-				5, //magnitude_max,
+				f32(len(magnitude) / 2 + 1),
+				-1, //magnitude_min,
+				200, //magnitude_max,
 				spec_rec,
 			)
 		}
@@ -339,7 +417,7 @@ main :: proc() {
 			/* spectrum */
 			rl.DrawRectangleRec(spec_rec, spec_bg_color)
 			// scatter all pixels
-			for i in 0 ..< n_fft {
+			for i in 0 ..< FFT_SIZE_C {
 				rl.DrawPixelV(plot_pixels[i], spec_pixel_color)
 			}
 			// average line plot
