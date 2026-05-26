@@ -301,7 +301,7 @@ main :: proc() {
 
 	/* ------------------------- FFT related ------------------------- */
 	magnitude_max_default: f32 = 20 * math.ceil(math.log10_f32(FFT_SIZE_R))
-	magnitude_min_default: f32 = -300
+	magnitude_min_default: f32 = -100
 	magnitude_max: f32 = magnitude_max_default
 	magnitude_min: f32 = magnitude_min_default
 	magnitude := make([]f32, FFT_SIZE_C)
@@ -384,12 +384,18 @@ main :: proc() {
 	plot_line_pts := make([^]rl.Vector2, plot_line_pts_count)
 	plot_pixels := make([^]rl.Vector2, FFT_SIZE_C)
 
-	rl.InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Mic-Waterfall")
+	rl.InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Microphone Spectrogram")
 	defer rl.CloseWindow()
+
+	rt := rl.LoadRenderTexture(WINDOW_WIDTH - 2 * spec_x, WINDOW_HEIGHT / 2 - 2 * spec_y - 30)
+	rt_tmp := rl.LoadRenderTexture(WINDOW_WIDTH - 2 * spec_x, WINDOW_HEIGHT / 2 - 2 * spec_y - 30)
+	defer rl.UnloadRenderTexture(rt)
+	defer rl.UnloadRenderTexture(rt_tmp)
 
 	rl.SetTargetFPS(rl_fps)
 
 	/* ------------------------- main loop ------------------------- */
+	blue := true
 	auto_scale_y := false
 	capturing := false
 	fps: f64 = 0.0
@@ -449,6 +455,21 @@ main :: proc() {
 			)
 		}
 
+		rl.BeginTextureMode(rt_tmp)
+		rl.ClearBackground(rl.BLANK)
+		rl.DrawTexture(rt.texture, 0, 1, rl.WHITE)
+		rl.EndTextureMode()
+
+		rl.BeginTextureMode(rt)
+		rl.DrawTexture(rt_tmp.texture, 0, 0, rl.WHITE)
+		blue = !blue
+		if blue {
+			rl.DrawLine(0, rt.texture.height, rt.texture.width, rt.texture.height, rl.BLUE)
+		} else {
+			rl.DrawLine(0, rt.texture.height, rt.texture.width, rt.texture.height, rl.RED)
+		}
+		rl.EndTextureMode()
+
 		rl.BeginDrawing()
 		{
 			rl.ClearBackground(rl.BLACK)
@@ -472,9 +493,11 @@ main :: proc() {
 				frames_total_time := f64(time.tick_since(frames_start_time)) / 1.0e9
 				time_per_frame := frames_total_time / f64(frames_count)
 				fps = 1 / time_per_frame
-				fps_str = strings.clone_to_cstring(fmt.aprintf("FPS: %.2f", fps))
+				fps_str = strings.clone_to_cstring(fmt.aprintf("FPS: %.1f", fps))
 			}
 			rl.DrawText(fps_str, 20, WINDOW_HEIGHT / 2 + 20, 20, rl.WHITE)
+
+			rl.DrawTexture(rt.texture, spec_x, WINDOW_HEIGHT / 2 + spec_y + 30, rl.WHITE)
 		}
 		rl.EndDrawing()
 	}
