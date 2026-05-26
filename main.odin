@@ -16,7 +16,7 @@ import ma "vendor:miniaudio"
 import rl "vendor:raylib"
 
 CHAN_CAPACITY :: 5
-FFT_SIZE_R :: 4096 * 2
+FFT_SIZE_R :: 4096
 FFT_SIZE_C :: FFT_SIZE_R / 2 + 1
 NUM_CHANNELS :: 2 // TODO: get this info from device
 NUM_THREADS :: 1
@@ -33,7 +33,7 @@ Task_Data :: struct {
 	frame_count:   u32,
 }
 
-User_Data :: struct {
+Capture_Data :: struct {
 	chan_callback: chan.Chan(ChanTypeCallback),
 }
 
@@ -42,6 +42,20 @@ Ring_Buffer :: struct {
 	head:  int, // index of slot where to write next
 	tail:  int, // index of slot where to read next
 	count: int, // number of items in the buffer
+}
+
+blackman_harris_window :: proc(n: int) -> []f32 {
+	a0 :: 0.4243801
+	a1 :: 0.4973406
+	a2 :: 0.0782793
+	pi: f32 = math.PI
+	win := make([]f32, n)
+	n := f32(n)
+	for i in 0 ..< n {
+		win[int(i)] =
+			a0 - a1 * math.cos_f32(2.0 * pi * i / n) + a2 * math.cos_f32(4.0 * pi * i / n)
+	}
+	return win
 }
 
 rb_init :: proc(rb: ^Ring_Buffer, cap: int) {
@@ -109,6 +123,9 @@ proc_data :: proc(task: thread.Task) {
 	plan_forward := fftw3.fftwf_plan_dft_r2c_1d(FFT_SIZE_R, buf_x, buf_X, fftw3.Flags.ESTIMATE)
 	defer fftw3.fftwf_destroy_plan(plan_forward)
 
+	bhw := blackman_harris_window(FFT_SIZE_R)
+	defer delete(bhw)
+
 	rb := &Ring_Buffer{}
 	rb_init(rb, 3 * FFT_SIZE_R)
 
@@ -122,14 +139,31 @@ proc_data :: proc(task: thread.Task) {
 
 		could_append := rb_append(rb, &arr)
 		if !could_append {
-			fmt.printfln("[Task(%v)]: ring-buffer too full, dropped data", task.user_index)
+			fmt.printfln("[Task(%v)] ring-buffer too full, dropped data", task.user_index)
 		}
 
 		if rb.count > FFT_SIZE_R {
-			for i in 0 ..< FFT_SIZE_R {
+			/* read data with 50% overlap */
+			// read and pop half of the array
+			for i in 0 ..< FFT_SIZE_R / 2 {
 				buf_x[i] = rb_pop(rb)
 			}
+			// read but don't pop the other half of the array
+			count_saved := rb.count
+			tail_saved := rb.tail
+			for i in FFT_SIZE_R / 2 ..< FFT_SIZE_R {
+				buf_x[i] = rb_pop(rb)
+			}
+			// restore the previous state, i.e., undo pop
+			rb.count = count_saved
+			rb.tail = tail_saved
 
+			/* windowing */
+			for i in 0 ..< FFT_SIZE_R {
+				buf_x[i] *= bhw[i]
+			}
+
+			/* FFT */
 			fftw3.fftwf_execute_dft_r2c(plan_forward, buf_x, buf_X)
 
 			to_send := make([]f32, FFT_SIZE_C)
@@ -141,13 +175,13 @@ proc_data :: proc(task: thread.Task) {
 				success := chan.send(chan_send, to_send)
 				if !success {
 					fmt.eprintfln(
-						"[Task(%v)]: ERROR: Failed to send to chan_send.",
+						"[Task(%v)] ERROR: Failed to send to chan_send.",
 						task.user_index,
 					)
 					os.exit(1)
 				}
 			} else {
-				fmt.printfln("[Task(%v)]: dropped data", task.user_index)
+				fmt.printfln("[Task(%v)] dropped data", task.user_index)
 			}
 		}
 	}
@@ -173,8 +207,8 @@ capture_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_c
 	context = runtime.default_context()
 
 	data_ptr: rawptr
-	user_data := cast(^User_Data)device.pUserData
-	chan_send := chan.as_send(user_data.chan_callback)
+	capture_data := cast(^Capture_Data)device.pUserData
+	chan_send := chan.as_send(capture_data.chan_callback)
 
 	if frame_count > 0 {
 		if chan.len(chan_send) < CHAN_CAPACITY - 1 {
@@ -314,10 +348,10 @@ main :: proc() {
 	frame_count := capture_device.capture.internalPeriodSizeInFrames
 	fmt.println("frame_count:", frame_count)
 
-	user_data: User_Data
-	user_data.chan_callback = chan_callback
+	capture_data: Capture_Data
+	capture_data.chan_callback = chan_callback
 
-	capture_device.pUserData = &user_data
+	capture_device.pUserData = &capture_data
 
 	// When device is started for the first time, it outputs ones followed by minus ones.
 	// By briefly starting the device here, we skip this initialization phase.
@@ -382,7 +416,7 @@ main :: proc() {
 		}
 
 		arr, ok := chan.try_recv(chan_recv)
-		// defer delete(arr)
+		defer delete(arr)
 		if ok {
 			magnitude = arr
 
