@@ -3,7 +3,6 @@ main: main.odin
 
 release: main.odin
 	odin build . -o:speed
-	./mic-waterfall
 
 download-odin:
 	mkdir downloads
