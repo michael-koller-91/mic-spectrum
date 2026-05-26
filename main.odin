@@ -107,8 +107,8 @@ rb_append :: proc(rb: ^Ring_Buffer, arr: ^[]f32) -> (success: bool) {
 }
 
 proc_data :: proc(task: thread.Task) {
-	fmt.printfln("[TASK(%v)] start working", task.user_index)
-	defer fmt.printfln("[TASK(%v)] stop working", task.user_index)
+	fmt.printfln("[Task(%v)] start working", task.user_index)
+	defer fmt.printfln("[Task(%v)] stop working", task.user_index)
 
 	task_data := cast(^Task_Data)task.data
 	chan_recv := chan.as_recv(task_data.chan_callback)
@@ -166,9 +166,10 @@ proc_data :: proc(task: thread.Task) {
 			/* FFT */
 			fftw3.fftwf_execute_dft_r2c(plan_forward, buf_x, buf_X)
 
+			/* convert to dB */
 			to_send := make([]f32, FFT_SIZE_C)
 			for i in 0 ..< FFT_SIZE_C {
-				to_send[i] = fftw3.abs(buf_X[i])
+				to_send[i] = 20.0 * math.log10(fftw3.abs(buf_X[i]) + 1e-15)
 			}
 
 			if chan.len(chan_send) < CHAN_CAPACITY - 2 {
@@ -299,18 +300,11 @@ main :: proc() {
 	rl_fps: i32 = 30
 
 	/* ------------------------- FFT related ------------------------- */
-	magnitude_max: f32 = math.F32_MIN
-	magnitude_min: f32 = math.F32_MAX
+	magnitude_max_default: f32 = 20 * math.ceil(math.log10_f32(FFT_SIZE_R))
+	magnitude_min_default: f32 = -300
+	magnitude_max: f32 = magnitude_max_default
+	magnitude_min: f32 = magnitude_min_default
 	magnitude := make([]f32, FFT_SIZE_C)
-	for &m in magnitude {
-		m = rand.float32_normal(0, 1)
-		if m < magnitude_min {
-			magnitude_min = m
-		}
-		if m > magnitude_max {
-			magnitude_max = m
-		}
-	}
 
 	/* ------------------------- channel related ------------------------- */
 	chan_callback, err_callback := chan.create(
@@ -396,6 +390,7 @@ main :: proc() {
 	rl.SetTargetFPS(rl_fps)
 
 	/* ------------------------- main loop ------------------------- */
+	auto_scale_y := false
 	capturing := false
 	fps: f64 = 0.0
 	fps_str := strings.clone_to_cstring(fmt.aprintf("FPS: %.2f", fps))
@@ -414,21 +409,31 @@ main :: proc() {
 			capturing = false
 			device_stop(&capture_device)
 		}
+		if rl.IsKeyPressed(.A) {
+			auto_scale_y = true
+		}
+		if rl.IsKeyPressed(.R) {
+			magnitude_max = magnitude_max_default
+			magnitude_min = magnitude_min_default
+		}
 
 		arr, ok := chan.try_recv(chan_recv)
 		defer delete(arr)
 		if ok {
 			magnitude = arr
 
-			magnitude_max = math.F32_MIN
-			magnitude_min = math.F32_MAX
-			for &m in magnitude {
-				if m < magnitude_min {
-					magnitude_min = m
+			if auto_scale_y {
+				magnitude_max = math.F32_MIN
+				magnitude_min = math.F32_MAX
+				for &m in magnitude {
+					if m < magnitude_min {
+						magnitude_min = m
+					}
+					if m > magnitude_max {
+						magnitude_max = m
+					}
 				}
-				if m > magnitude_max {
-					magnitude_max = m
-				}
+				auto_scale_y = false
 			}
 
 			map_to_rec(
@@ -438,8 +443,8 @@ main :: proc() {
 				plot_pixels,
 				0,
 				f32(len(magnitude) / 2 + 1),
-				-1, //magnitude_min,
-				200, //magnitude_max,
+				magnitude_min,
+				magnitude_max,
 				spec_rec,
 			)
 		}
