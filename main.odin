@@ -58,6 +58,37 @@ blackman_harris_window :: proc(n: int) -> []f32 {
 	return win
 }
 
+color_map :: proc(x: f32) -> (rgba: rl.Color) {
+	x := x
+	rgba.a = 255
+	r, g, b: f32
+	if x < 0.25 {
+		x = x / 0.25
+		r = 0
+		g = x
+		b = 1
+	} else if x < 0.5 {
+		x = (x - 0.25) / 0.25
+		r = 0
+		g = 1
+		b = 1 - x
+	} else if x < 0.75 {
+		x = (x - 0.5) / 0.25
+		r = x
+		g = 1
+		b = 0
+	} else {
+		x = (x - 0.75) / 0.25
+		r = 1
+		g = 1 - x
+		b = 0
+	}
+	rgba.r = u8(math.round(255 * r))
+	rgba.g = u8(math.round(255 * g))
+	rgba.b = u8(math.round(255 * b))
+	return
+}
+
 rb_init :: proc(rb: ^Ring_Buffer, cap: int) {
 	rb.data = make([]f32, cap)
 	rb.head = 0
@@ -384,18 +415,17 @@ main :: proc() {
 	plot_line_pts := make([^]rl.Vector2, plot_line_pts_count)
 	plot_pixels := make([^]rl.Vector2, FFT_SIZE_C)
 
-	rl.InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Microphone Spectrogram")
+	rl.InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Microphone Spectrum")
 	defer rl.CloseWindow()
 
-	rt := rl.LoadRenderTexture(WINDOW_WIDTH - 2 * spec_x, WINDOW_HEIGHT / 2 - 2 * spec_y - 30)
-	rt_tmp := rl.LoadRenderTexture(WINDOW_WIDTH - 2 * spec_x, WINDOW_HEIGHT / 2 - 2 * spec_y - 30)
+	rt := rl.LoadRenderTexture(spec_w, spec_h)
+	rt_tmp := rl.LoadRenderTexture(spec_w, spec_h)
 	defer rl.UnloadRenderTexture(rt)
 	defer rl.UnloadRenderTexture(rt_tmp)
 
 	rl.SetTargetFPS(rl_fps)
 
 	/* ------------------------- main loop ------------------------- */
-	blue := true
 	auto_scale_y := false
 	capturing := false
 	fps: f64 = 0.0
@@ -462,11 +492,9 @@ main :: proc() {
 
 		rl.BeginTextureMode(rt)
 		rl.DrawTexture(rt_tmp.texture, 0, 0, rl.WHITE)
-		blue = !blue
-		if blue {
-			rl.DrawLine(0, rt.texture.height, rt.texture.width, rt.texture.height, rl.BLUE)
-		} else {
-			rl.DrawLine(0, rt.texture.height, rt.texture.width, rt.texture.height, rl.RED)
+		// draw a new line at top
+		for x in 0 ..< rt.texture.width {
+			rl.DrawPixel(x, rt.texture.height - 1, color_map(f32(x) / f32(rt.texture.width)))
 		}
 		rl.EndTextureMode()
 
@@ -497,6 +525,7 @@ main :: proc() {
 			}
 			rl.DrawText(fps_str, 20, WINDOW_HEIGHT / 2 + 20, 20, rl.WHITE)
 
+			/* waterfall */
 			rl.DrawTexture(rt.texture, spec_x, WINDOW_HEIGHT / 2 + spec_y + 30, rl.WHITE)
 		}
 		rl.EndDrawing()
