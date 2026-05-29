@@ -1,11 +1,12 @@
 package main
 
+// TODO: compute waterfall and spectrum pixels in worker task
+
 import fftw3 "./fftw3-odin-bindings/fftw3"
 import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:math"
-import "core:math/rand"
 import "core:mem"
 import "core:os"
 import "core:strings"
@@ -44,13 +45,13 @@ Ring_Buffer :: struct {
 	count: int, // number of items in the buffer
 }
 
-blackman_harris_window :: proc(n: int) -> []f32 {
+blackman_harris_window :: proc(length: int) -> []f32 {
 	a0 :: 0.4243801
 	a1 :: 0.4973406
 	a2 :: 0.0782793
 	pi: f32 = math.PI
-	win := make([]f32, n)
-	n := f32(n)
+	win := make([]f32, length)
+	n := f32(length)
 	for i in 0 ..< n {
 		win[int(i)] =
 			a0 - a1 * math.cos_f32(2.0 * pi * i / n) + a2 * math.cos_f32(4.0 * pi * i / n)
@@ -257,8 +258,13 @@ capture_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_c
 	}
 }
 
+/*
+Convert x from range [x_min, x_max] to range [0, 1].
+Convert y from range [y_min, y_max] to range [0, 1].
+*/
 normalize :: proc(x, y, x_min, x_max, y_min, y_max: f32) -> (x01, y01: f32) {
 	when ODIN_DEBUG {
+		// this is super slow, so only in debug
 		assert(x_max > x_min, "Expected x_max > x_min.")
 		assert(y_max >= y_min, "Expected y_max >= y_min.")
 	}
@@ -278,6 +284,7 @@ map_to_rec :: proc(
 	output_line_points: [^]rl.Vector2,
 	line_points_count: i32,
 	output_pixels: [^]rl.Vector2,
+	output_raw_avg: ^[]f32,
 	x_min, x_max, y_min, y_max: f32,
 	rec: rl.Rectangle,
 ) {
@@ -315,9 +322,10 @@ map_to_rec :: proc(
 		if count[x_pxl] == 0 {
 			count[x_pxl] += 1
 		}
+		output_raw_avg[x_pxl] = accu[x_pxl] / count[x_pxl]
 		// add offset so that the result lies within rec
 		output_line_points[x_pxl][0] = rec.x + f32(x_pxl)
-		output_line_points[x_pxl][1] = rec.y + rec.height - accu[x_pxl] / count[x_pxl] // because y = 0 is top in rl
+		output_line_points[x_pxl][1] = rec.y + rec.height - output_raw_avg[x_pxl] // because y = 0 is top in rl
 	}
 }
 
@@ -331,11 +339,11 @@ main :: proc() {
 	rl_fps: i32 = 30
 
 	/* ------------------------- FFT related ------------------------- */
-	magnitude_max_default: f32 = 20 * math.ceil(math.log10_f32(FFT_SIZE_R))
-	magnitude_min_default: f32 = -100
-	magnitude_max: f32 = magnitude_max_default
-	magnitude_min: f32 = magnitude_min_default
-	magnitude := make([]f32, FFT_SIZE_C)
+	mag_max_default: f32 = 20 * math.ceil(math.log10_f32(FFT_SIZE_R))
+	mag_min_default: f32 = -100
+	mag_max: f32 = mag_max_default
+	mag_min: f32 = mag_min_default
+	mag := make([]f32, FFT_SIZE_C)
 
 	/* ------------------------- channel related ------------------------- */
 	chan_callback, err_callback := chan.create(
@@ -413,13 +421,14 @@ main :: proc() {
 
 	plot_line_pts_count := i32(spec_rec.width)
 	plot_line_pts := make([^]rl.Vector2, plot_line_pts_count)
+	plot_line_avg := make([]f32, plot_line_pts_count)
 	plot_pixels := make([^]rl.Vector2, FFT_SIZE_C)
 
 	rl.InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Microphone Spectrum")
 	defer rl.CloseWindow()
 
-	rt := rl.LoadRenderTexture(spec_w, spec_h)
-	rt_tmp := rl.LoadRenderTexture(spec_w, spec_h)
+	rt := rl.LoadRenderTexture(spec_w, spec_h - 30)
+	rt_tmp := rl.LoadRenderTexture(rt.texture.width, rt.texture.height)
 	defer rl.UnloadRenderTexture(rt)
 	defer rl.UnloadRenderTexture(rt_tmp)
 
@@ -449,54 +458,62 @@ main :: proc() {
 			auto_scale_y = true
 		}
 		if rl.IsKeyPressed(.R) {
-			magnitude_max = magnitude_max_default
-			magnitude_min = magnitude_min_default
+			mag_max = mag_max_default
+			mag_min = mag_min_default
 		}
 
 		arr, ok := chan.try_recv(chan_recv)
 		defer delete(arr)
 		if ok {
-			magnitude = arr
+			mag = arr
 
 			if auto_scale_y {
-				magnitude_max = math.F32_MIN
-				magnitude_min = math.F32_MAX
-				for &m in magnitude {
-					if m < magnitude_min {
-						magnitude_min = m
+				mag_max = math.F32_MIN
+				mag_min = math.F32_MAX
+				for &m in mag {
+					if m < mag_min {
+						mag_min = m
 					}
-					if m > magnitude_max {
-						magnitude_max = m
+					if m > mag_max {
+						mag_max = m
 					}
 				}
 				auto_scale_y = false
 			}
 
 			map_to_rec(
-				&magnitude,
+				&mag,
 				plot_line_pts,
 				plot_line_pts_count,
 				plot_pixels,
+				&plot_line_avg,
 				0,
-				f32(len(magnitude) / 2 + 1),
-				magnitude_min,
-				magnitude_max,
+				f32(len(mag) / 2 + 1),
+				mag_min,
+				mag_max,
 				spec_rec,
 			)
-		}
 
-		rl.BeginTextureMode(rt_tmp)
-		rl.ClearBackground(rl.BLANK)
-		rl.DrawTexture(rt.texture, 0, 1, rl.WHITE)
-		rl.EndTextureMode()
+			// draw texture one pixel down
+			rl.BeginTextureMode(rt_tmp)
+			{
+				rl.ClearBackground(rl.BLANK)
+				rl.DrawTexture(rt.texture, 0, 1, rl.WHITE)
+			}
+			rl.EndTextureMode()
 
-		rl.BeginTextureMode(rt)
-		rl.DrawTexture(rt_tmp.texture, 0, 0, rl.WHITE)
-		// draw a new line at top
-		for x in 0 ..< rt.texture.width {
-			rl.DrawPixel(x, rt.texture.height - 1, color_map(f32(x) / f32(rt.texture.width)))
+			rl.BeginTextureMode(rt)
+			{
+				// draw texture
+				rl.DrawTexture(rt_tmp.texture, 0, 0, rl.WHITE)
+				// draw a new line at the top
+				for x in 0 ..< rt.texture.width {
+					x01 := plot_line_avg[x] / (spec_rec.height - 1)
+					rl.DrawPixel(x, rt.texture.height - 1, color_map(x01))
+				}
+			}
+			rl.EndTextureMode()
 		}
-		rl.EndTextureMode()
 
 		rl.BeginDrawing()
 		{
