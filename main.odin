@@ -1,6 +1,7 @@
 package main
 
 // TODO: compute waterfall and spectrum pixels in worker task
+// TODO: there is a bug with FFT_SIZE_R = 2048 and smaller
 
 import fftw3 "./fftw3-odin-bindings/fftw3"
 import "base:runtime"
@@ -59,30 +60,29 @@ blackman_harris_window :: proc(length: int) -> []f32 {
 	return win
 }
 
+// dark purple    (0.05, 0.00, 0.50)
+// medium purple  (0.25, 0.00, 0.75)
+// bright pink    (0.75, 0.00, 0.25)
+// yellow         (1.00, 1.00, 0.00)
 color_map :: proc(x: f32) -> (rgba: rl.Color) {
 	x := x
 	rgba.a = 255
 	r, g, b: f32
-	if x < 0.25 {
-		x = x / 0.25
-		r = 0
-		g = x
-		b = 1
-	} else if x < 0.5 {
-		x = (x - 0.25) / 0.25
-		r = 0
-		g = 1
-		b = 1 - x
-	} else if x < 0.75 {
-		x = (x - 0.5) / 0.25
-		r = x
-		g = 1
-		b = 0
+	if x < 0.33 {
+		x = x / 0.33
+		r = 0.05 * 0.2 * x
+		g = 0
+		b = 0.5 + 0.25 * x
+	} else if x < 0.66 {
+		x = (x - 0.33) / 0.33
+		r = 0.25 + 0.5 * x
+		g = 0
+		b = 0.75 - 0.5 * x
 	} else {
-		x = (x - 0.75) / 0.25
-		r = 1
-		g = 1 - x
-		b = 0
+		x = (x - 0.66) / 0.33
+		r = 0.75 + 0.25 * x
+		g = x
+		b = 0.25 - 0.25 * x
 	}
 	rgba.r = u8(math.round(255 * r))
 	rgba.g = u8(math.round(255 * g))
