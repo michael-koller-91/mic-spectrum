@@ -1,7 +1,6 @@
 package main
 
-// TODO: compute waterfall and spectrum pixels in worker task
-// TODO: there is a bug with FFT_SIZE_R = 2048 and smaller
+// TODO: compute waterfall and spectrum pixels in worker task?
 
 MEMTRACK :: #config(MEMTRACK, false)
 
@@ -70,13 +69,13 @@ color_map :: proc(x: f32) -> (rgba: rl.Color) {
 	x := x
 	rgba.a = 255
 	r, g, b: f32
-	if x < 0.33 {
-		x = x / 0.33
+	if x < 0.20 {
+		x = x / 0.20
 		r = 0.05 + 0.2 * x
 		g = 0
 		b = 0.5 + 0.25 * x
 	} else if x < 0.66 {
-		x = (x - 0.33) / 0.33
+		x = (x - 0.20) / 0.46
 		r = 0.25 + 0.5 * x
 		g = 0
 		b = 0.75 - 0.5 * x
@@ -238,6 +237,9 @@ device_stop :: proc(device: ^ma.device) {
 	}
 }
 
+/*
+Callback to capture microphone samples. Frames of samples are sent to the worker task.
+*/
 capture_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_count: u32) {
 	context = runtime.default_context()
 
@@ -255,7 +257,7 @@ capture_callback :: proc "c" (device: ^ma.device, output, input: rawptr, frame_c
 				os.exit(1)
 			}
 		} else {
-			fmt.println("capture_callback: dropped frames")
+			fmt.printfln("capture_callback: dropped %v frames", frame_count)
 		}
 	}
 }
@@ -549,7 +551,7 @@ main :: proc() {
 				plot_pixels,
 				&plot_line_avg,
 				0,
-				f32(len(mag) / 2 + 1),
+				f32(len(mag)),
 				mag_min,
 				mag_max,
 				spec_rec,
