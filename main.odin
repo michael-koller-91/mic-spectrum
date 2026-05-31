@@ -61,10 +61,14 @@ blackman_harris_window :: proc(length: int) -> []f32 {
 	return win
 }
 
-// dark purple    (0.05, 0.00, 0.50)
-// medium purple  (0.25, 0.00, 0.75)
-// bright pink    (0.75, 0.00, 0.25)
-// yellow         (1.00, 1.00, 0.00)
+/*
+Something resembling the colormap plasma.
+
+dark purple   : (0.05, 0.00, 0.50)
+medium purple : (0.25, 0.00, 0.75)
+bright pink   : (0.75, 0.00, 0.25)
+yellow        : (1.00, 1.00, 0.00)
+*/
 color_map :: proc(x: f32) -> (rgba: rl.Color) {
 	x := x
 	rgba.a = 255
@@ -91,6 +95,9 @@ color_map :: proc(x: f32) -> (rgba: rl.Color) {
 	return
 }
 
+/*
+Initialize the ring buffer `rb` with capacity `cap`.
+*/
 rb_init :: proc(rb: ^Ring_Buffer, cap: int) {
 	rb.data = make([]f32, cap)
 	rb.head = 0
@@ -98,6 +105,9 @@ rb_init :: proc(rb: ^Ring_Buffer, cap: int) {
 	rb.count = 0
 }
 
+/*
+Push a value to the ring buffer (push back).
+*/
 rb_push :: proc(rb: ^Ring_Buffer, item: f32) {
 	rb.data[rb.head] = item
 	rb.head += 1
@@ -107,6 +117,9 @@ rb_push :: proc(rb: ^Ring_Buffer, item: f32) {
 	rb.count += 1
 }
 
+/*
+Pop a value from the ring buffer (pop front).
+*/
 rb_pop :: proc(rb: ^Ring_Buffer) -> (item: f32) {
 	item = rb.data[rb.tail]
 	rb.tail += 1
@@ -117,10 +130,16 @@ rb_pop :: proc(rb: ^Ring_Buffer) -> (item: f32) {
 	return
 }
 
+/*
+The number of slots still empty in the ring buffer.
+*/
 rb_empty_slots :: proc(rb: ^Ring_Buffer) -> int {
 	return len(rb.data) - rb.count
 }
 
+/*
+Append a whole array to the ring buffer.
+*/
 rb_append :: proc(rb: ^Ring_Buffer, arr: ^[]f32) -> (success: bool) {
 	success = false
 	sample_count := len(arr) / NUM_CHANNELS
@@ -139,7 +158,11 @@ rb_append :: proc(rb: ^Ring_Buffer, arr: ^[]f32) -> (success: bool) {
 	return
 }
 
-proc_data :: proc(task: thread.Task) {
+/*
+The Worker Task.
+Process the microphone samples to produce spectrum values.
+*/
+dsp :: proc(task: thread.Task) {
 	fmt.printfln("[Task(%v)] start working", task.user_index)
 	defer fmt.printfln("[Task(%v)] stop working", task.user_index)
 
@@ -168,7 +191,6 @@ proc_data :: proc(task: thread.Task) {
 			fmt.printfln("[Task(%v)] chan_callback is closed", task.user_index)
 			break
 		}
-		defer delete(arr)
 
 		could_append := rb_append(rb, &arr)
 		if !could_append {
@@ -221,6 +243,9 @@ proc_data :: proc(task: thread.Task) {
 	}
 }
 
+/*
+Start capturing microphone samples.
+*/
 device_start :: proc(device: ^ma.device) {
 	result := ma.device_start(device)
 	if result != .SUCCESS {
@@ -229,6 +254,9 @@ device_start :: proc(device: ^ma.device) {
 	}
 }
 
+/*
+Stop capturing microphone samples.
+*/
 device_stop :: proc(device: ^ma.device) {
 	result := ma.device_stop(device)
 	if result != .SUCCESS {
@@ -382,9 +410,6 @@ main :: proc() {
 		}
 	}
 
-
-	rl_fps: i32 = 30
-
 	/* ------------------------- FFT related ------------------------- */
 	mag_max_default: f32 = 20 * math.ceil(math.log10_f32(FFT_SIZE_R))
 	mag_min_default: f32 = -100
@@ -451,16 +476,18 @@ main :: proc() {
 			chan_main     = chan_main,
 			frame_count   = frame_count,
 		}
-		thread.pool_add_task(&pool, context.allocator, proc_data, &task_data[i], i)
+		thread.pool_add_task(&pool, context.allocator, dsp, &task_data[i], i)
 	}
 
 	thread.pool_start(&pool)
 
 	/* ------------------------- rl related ------------------------- */
+	rl_fps: i32 = 30
+
 	spec_x: i32 = 30
 	spec_y: i32 = 10
 	spec_h: i32 = WINDOW_HEIGHT / 2 - spec_y - 10
-	spec_w: i32 = WINDOW_WIDTH - spec_x - 10
+	spec_w: i32 = WINDOW_WIDTH - spec_x - 40
 	spec_rec := rl.Rectangle{f32(spec_x), f32(spec_y), f32(spec_w), f32(spec_h)}
 	spec_bg_color := rl.Color{40, 40, 40, 255}
 	spec_line_color :: rl.Color{250, 240, 0, 255}
@@ -473,6 +500,24 @@ main :: proc() {
 
 	rl.InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Microphone Spectrum")
 	defer rl.CloseWindow()
+
+	xtick_color := rl.WHITE
+	xtick_font_size: i32 = 14
+	xtick_len: f32 = 10
+	xtick_num: i32 = 10
+	xtick_text := make([]cstring, xtick_num)
+	xtick_text_len := make([]i32, xtick_num)
+	for x in 0 ..< xtick_num {
+		frequency := f32(x) * f32(SAMPLE_RATE) / 2 / f32(xtick_num - 1)
+		t := fmt.aprintf("%.0f", frequency)
+		xtick_text[x] = strings.clone_to_cstring(t)
+		delete(t)
+		xtick_text_len[x] = rl.MeasureText(xtick_text[x], xtick_font_size) // needs to be called after rl.InitWindow
+	}
+	defer for x in 0 ..< xtick_num {
+		delete(xtick_text[x])
+	}
+	defer delete(xtick_text_len)
 
 	// texture for waterfall
 	rt_wf := rl.LoadRenderTexture(spec_w, spec_h - 30)
@@ -592,9 +637,25 @@ main :: proc() {
 			rl.DrawLineStrip(plot_line_pts, plot_line_pts_count, spec_line_color)
 
 			/* horizontal splitter */
-			startPos: rl.Vector2 = {0, WINDOW_HEIGHT / 2}
-			endPos: rl.Vector2 = {WINDOW_WIDTH, WINDOW_HEIGHT / 2}
-			rl.DrawLineV(startPos, endPos, rl.WHITE)
+			start_pos: rl.Vector2 = {0, WINDOW_HEIGHT / 2}
+			end_pos: rl.Vector2 = {WINDOW_WIDTH, WINDOW_HEIGHT / 2}
+			rl.DrawLineV(start_pos, end_pos, rl.WHITE)
+
+			/* horizontal axis */
+			xtick_lower: rl.Vector2 = {0, WINDOW_HEIGHT / 2 + xtick_len / 2}
+			xtick_upper: rl.Vector2 = {0, WINDOW_HEIGHT / 2 - xtick_len / 2}
+			for x in 0 ..< xtick_num {
+				xtick_lower.x = f32(spec_x) + f32(x) * f32(spec_w) / f32(xtick_num - 1)
+				xtick_upper.x = f32(spec_x) + f32(x) * f32(spec_w) / f32(xtick_num - 1)
+				rl.DrawLineV(xtick_lower, xtick_upper, xtick_color)
+				rl.DrawText(
+					xtick_text[x],
+					i32(xtick_lower.x) - xtick_text_len[x] / 2,
+					i32(xtick_lower.y) + xtick_font_size / 2,
+					xtick_font_size,
+					xtick_color,
+				)
+			}
 
 			/* frames per second */
 			if frames_count % 10 == 0 {

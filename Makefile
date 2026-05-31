@@ -5,7 +5,7 @@ release: main.odin
 	odin build . -o:speed
 
 memtrack: main.odin
-	odin build . -define:MEMTRACK=true
+	odin run . -define:MEMTRACK=true
 
 download-odin:
 	mkdir downloads
