@@ -1,6 +1,12 @@
 package main
 
-// TODO: compute waterfall and spectrum pixels in worker task?
+/* TODO:
+  * compute waterfall and spectrum pixels in worker task?
+  * vertical grid seems to be off by one pixel
+  * single spectrum pixels can be one pixel below lowest horizontal line
+  * get NUM_CHANNELS from device
+  * get SAMPLE_RATE from device
+*/
 
 MEMTRACK :: #config(MEMTRACK, false)
 
@@ -21,9 +27,9 @@ import rl "vendor:raylib"
 CHAN_CAPACITY :: 5
 FFT_SIZE_R :: 4096
 FFT_SIZE_C :: FFT_SIZE_R / 2 + 1
-NUM_CHANNELS :: 2 // TODO: get this info from device
+NUM_CHANNELS :: 2
 NUM_THREADS :: 1
-SAMPLE_RATE :: 44100 // TODO: get this info from device?
+SAMPLE_RATE :: 44100
 WINDOW_HEIGHT :: 600
 WINDOW_WIDTH :: 800
 
@@ -488,12 +494,18 @@ main :: proc() {
 	/* ------------------------- rl related ------------------------- */
 	rl_fps: i32 = 30
 
-	spec_x: i32 = 30
+	tick_color := rl.WHITE
+	tick_len: f32 = 10
+	tick_font_size: i32 = 14
+
+	spec_x: i32 = 50
 	spec_y: i32 = 10
-	spec_h: i32 = WINDOW_HEIGHT / 2 - spec_y - 10
+	spec_h: i32 = WINDOW_HEIGHT / 2 - spec_y - 20
 	spec_w: i32 = WINDOW_WIDTH - spec_x - 40
 	spec_rec := rl.Rectangle{f32(spec_x), f32(spec_y), f32(spec_w), f32(spec_h)}
+
 	spec_bg_color := rl.Color{40, 40, 40, 255}
+	spec_grid_color :: rl.Color{100, 100, 100, 255}
 	spec_line_color :: rl.Color{250, 240, 0, 255}
 	spec_pixel_color :: rl.Color{250, 200, 0, 255}
 
@@ -510,9 +522,6 @@ main :: proc() {
 	rl.InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Microphone Spectrum")
 	defer rl.CloseWindow()
 
-	xtick_color := rl.WHITE
-	xtick_font_size: i32 = 14
-	xtick_len: f32 = 10
 	xtick_num: i32 = 10
 	xtick_text := make([]cstring, xtick_num)
 	xtick_text_len := make([]i32, xtick_num)
@@ -521,12 +530,29 @@ main :: proc() {
 		t := fmt.aprintf("%.0f", frequency)
 		xtick_text[x] = strings.clone_to_cstring(t)
 		delete(t)
-		xtick_text_len[x] = rl.MeasureText(xtick_text[x], xtick_font_size) // needs to be called after rl.InitWindow
+		xtick_text_len[x] = rl.MeasureText(xtick_text[x], tick_font_size) // needs to be called after rl.InitWindow
 	}
 	defer delete(xtick_text)
 	defer delete(xtick_text_len)
 	defer for x in 0 ..< xtick_num {
 		delete(xtick_text[x])
+	}
+
+	spec_ytick_num: i32 = 5
+	spec_ytick_text := make([]cstring, spec_ytick_num)
+	spec_ytick_text_len := make([]i32, spec_ytick_num)
+	for y in 0 ..< spec_ytick_num {
+		yy := spec_ytick_num - 1 - y
+		db := f32(y) * (mag_max_default - mag_min_default) + mag_min_default
+		t := fmt.aprintf("%.1f", db)
+		spec_ytick_text[yy] = strings.clone_to_cstring(t)
+		delete(t)
+		spec_ytick_text_len[yy] = rl.MeasureText(spec_ytick_text[yy], tick_font_size) // needs to be called after rl.InitWindow
+	}
+	defer delete(spec_ytick_text)
+	defer delete(spec_ytick_text_len)
+	defer for y in 0 ..< spec_ytick_num {
+		delete(spec_ytick_text[y])
 	}
 
 	// texture for waterfall
@@ -600,6 +626,17 @@ main :: proc() {
 					}
 				}
 				auto_scale_y = false
+
+				// update y-axis labels
+				for y in 0 ..< spec_ytick_num {
+					yy := spec_ytick_num - 1 - y
+					db := f32(y) * (mag_max - mag_min) + mag_min
+					t := fmt.aprintf("%.1f", db)
+					delete(spec_ytick_text[yy])
+					spec_ytick_text[yy] = strings.clone_to_cstring(t)
+					delete(t)
+					spec_ytick_text_len[yy] = rl.MeasureText(spec_ytick_text[yy], tick_font_size)
+				}
 			}
 
 			map_to_rec(
@@ -640,35 +677,73 @@ main :: proc() {
 		{
 			rl.ClearBackground(rl.BLACK)
 
-			/* spectrum */
+			/* spectrum rectangle */
 			rl.DrawRectangleRec(spec_rec, spec_bg_color)
-			// scatter all pixels
-			for i in 0 ..< FFT_SIZE_C {
-				rl.DrawPixelV(plot_pixels[i], spec_pixel_color)
-			}
-			// average line plot
-			rl.DrawLineStrip(plot_line_pts, plot_line_pts_count, spec_line_color)
 
 			/* horizontal splitter and axis */
 			start_pos: rl.Vector2 = {0, WINDOW_HEIGHT / 2}
 			end_pos: rl.Vector2 = {WINDOW_WIDTH, WINDOW_HEIGHT / 2}
 			rl.DrawLineV(start_pos, end_pos, rl.WHITE)
 
-			/* horizontal axis ticks and text */
-			xtick_lower: rl.Vector2 = {0, WINDOW_HEIGHT / 2 + xtick_len / 2}
-			xtick_upper: rl.Vector2 = {0, WINDOW_HEIGHT / 2 - xtick_len / 2}
+			/* horizontal axis text, grid, tick */
+			xtick_lower: rl.Vector2 = {0, WINDOW_HEIGHT / 2 + tick_len / 2}
+			xtick_upper: rl.Vector2 = {0, WINDOW_HEIGHT / 2 - tick_len / 2}
 			for x in 0 ..< xtick_num {
 				xtick_lower.x = f32(spec_x) + f32(x) * f32(spec_w) / f32(xtick_num - 1)
 				xtick_upper.x = f32(spec_x) + f32(x) * f32(spec_w) / f32(xtick_num - 1)
-				rl.DrawLineV(xtick_lower, xtick_upper, xtick_color)
+				// text
 				rl.DrawText(
 					xtick_text[x],
 					i32(xtick_lower.x) - xtick_text_len[x] / 2,
-					i32(xtick_lower.y) + xtick_font_size / 2,
-					xtick_font_size,
-					xtick_color,
+					i32(xtick_lower.y) + tick_font_size / 2,
+					tick_font_size,
+					tick_color,
 				)
+				// grid
+				rl.DrawLine(
+					i32(xtick_lower.x),
+					spec_y,
+					i32(xtick_lower.x),
+					spec_y + spec_h,
+					spec_grid_color,
+				)
+				// tick
+				rl.DrawLineV(xtick_lower, xtick_upper, tick_color)
 			}
+
+			/* vertical spectrum grid */
+			ytick_left: rl.Vector2 = {f32(spec_x) - tick_len / 2, 0}
+			ytick_right: rl.Vector2 = {f32(spec_x) + tick_len / 2, 0}
+			for y in 0 ..< spec_ytick_num {
+				ytick_left.y = f32(spec_y) + f32(y) * f32(spec_h) / f32(spec_ytick_num - 1)
+				ytick_right.y = f32(spec_y) + f32(y) * f32(spec_h) / f32(spec_ytick_num - 1)
+				// grid
+				rl.DrawLine(
+					spec_x,
+					i32(ytick_left.y),
+					spec_x + spec_w,
+					i32(ytick_left.y),
+					spec_grid_color,
+				)
+				// text
+				rl.DrawText(
+					spec_ytick_text[y],
+					i32(ytick_left.x) - spec_ytick_text_len[y] - tick_font_size / 2,
+					i32(ytick_left.y) - tick_font_size / 2,
+					tick_font_size,
+					tick_color,
+				)
+				// tick
+				rl.DrawLineV(ytick_left, ytick_right, tick_color)
+			}
+
+			/* spectrum */
+			// scatter all pixels
+			for i in 0 ..< FFT_SIZE_C {
+				rl.DrawPixelV(plot_pixels[i], spec_pixel_color)
+			}
+			// average line plot
+			rl.DrawLineStrip(plot_line_pts, plot_line_pts_count, spec_line_color)
 
 			/* frames per second */
 			if frames_count % 10 == 0 {
