@@ -4,6 +4,9 @@ main: main.odin
 release: main.odin
 	odin build . -o:speed
 
+memtrack: main.odin
+	odin build . -define:MEMTRACK=true
+
 download-odin:
 	mkdir downloads
 	# download and unpack Odin

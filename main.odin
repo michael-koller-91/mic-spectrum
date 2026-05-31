@@ -3,6 +3,8 @@ package main
 // TODO: compute waterfall and spectrum pixels in worker task
 // TODO: there is a bug with FFT_SIZE_R = 2048 and smaller
 
+MEMTRACK :: #config(MEMTRACK, false)
+
 import fftw3 "./fftw3-odin-bindings/fftw3"
 import "base:runtime"
 import "core:fmt"
@@ -335,6 +337,49 @@ main :: proc() {
 	} else {
 		context.logger = log.create_console_logger(.Info)
 	}
+
+	when MEMTRACK {
+		track1: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track1, context.allocator)
+		context.allocator = mem.tracking_allocator(&track1)
+
+		defer {
+			if len(track1.allocation_map) > 0 {
+				fmt.eprintf(
+					"=== %v context.allocator allocations not freed: ===\n",
+					len(track1.allocation_map),
+				)
+				for _, entry in track1.allocation_map {
+					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
+				}
+			} else {
+				fmt.printfln("=== context.allocator tracking was active (no missed frees) ===")
+			}
+			mem.tracking_allocator_destroy(&track1)
+		}
+
+		track2: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track2, context.temp_allocator)
+		context.temp_allocator = mem.tracking_allocator(&track2)
+
+		defer {
+			if len(track2.allocation_map) > 0 {
+				fmt.eprintf(
+					"=== %v context.temp_allocator allocations not freed: ===\n",
+					len(track2.allocation_map),
+				)
+				for _, entry in track2.allocation_map {
+					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
+				}
+			} else {
+				fmt.printfln(
+					"=== context.temp_allocator tracking was active (no missed frees) ===",
+				)
+			}
+			mem.tracking_allocator_destroy(&track2)
+		}
+	}
+
 
 	rl_fps: i32 = 30
 
