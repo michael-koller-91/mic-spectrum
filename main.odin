@@ -98,11 +98,15 @@ color_map :: proc(x: f32) -> (rgba: rl.Color) {
 /*
 Initialize the ring buffer `rb` with capacity `cap`.
 */
-rb_init :: proc(rb: ^Ring_Buffer, cap: int) {
+rb_make :: proc(rb: ^Ring_Buffer, cap: int) {
 	rb.data = make([]f32, cap)
 	rb.head = 0
 	rb.tail = 0
 	rb.count = 0
+}
+
+rb_delete :: proc(rb: ^Ring_Buffer) {
+	delete(rb.data)
 }
 
 /*
@@ -183,7 +187,8 @@ dsp :: proc(task: thread.Task) {
 	defer delete(bhw)
 
 	rb := &Ring_Buffer{}
-	rb_init(rb, 3 * FFT_SIZE_R)
+	rb_make(rb, 3 * FFT_SIZE_R)
+	defer rb_delete(rb)
 
 	for {
 		arr, ok := chan.recv(chan_recv)
@@ -415,7 +420,6 @@ main :: proc() {
 	mag_min_default: f32 = -100
 	mag_max: f32 = mag_max_default
 	mag_min: f32 = mag_min_default
-	mag := make([]f32, FFT_SIZE_C)
 
 	/* ------------------------- channel related ------------------------- */
 	chan_callback, err_callback := chan.create(
@@ -497,6 +501,11 @@ main :: proc() {
 	plot_line_pts := make([^]rl.Vector2, plot_line_pts_count)
 	plot_line_avg := make([]f32, plot_line_pts_count)
 	plot_pixels := make([^]rl.Vector2, FFT_SIZE_C)
+	defer {
+		free(plot_line_pts)
+		delete(plot_line_avg)
+		free(plot_pixels)
+	}
 
 	rl.InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Microphone Spectrum")
 	defer rl.CloseWindow()
@@ -514,10 +523,11 @@ main :: proc() {
 		delete(t)
 		xtick_text_len[x] = rl.MeasureText(xtick_text[x], xtick_font_size) // needs to be called after rl.InitWindow
 	}
+	defer delete(xtick_text)
+	defer delete(xtick_text_len)
 	defer for x in 0 ..< xtick_num {
 		delete(xtick_text[x])
 	}
-	defer delete(xtick_text_len)
 
 	// texture for waterfall
 	rt_wf := rl.LoadRenderTexture(spec_w, spec_h - 30)
@@ -545,8 +555,13 @@ main :: proc() {
 	/* ------------------------- main loop ------------------------- */
 	auto_scale_y := false
 	capturing := false
+
 	fps: f64 = 0.0
-	fps_str := strings.clone_to_cstring(fmt.aprintf("FPS: %.2f", fps))
+	fps_str := fmt.aprintf("FPS: %.2f", fps)
+	defer delete(fps_str)
+	fps_cstr := strings.clone_to_cstring(fps_str)
+	defer delete(fps_cstr)
+
 	rd_avail: f32 = 0.0
 	frames_count := 0
 	frames_start_time := time.tick_now()
@@ -570,11 +585,9 @@ main :: proc() {
 			mag_min = mag_min_default
 		}
 
-		arr, ok := chan.try_recv(chan_recv)
-		defer delete(arr)
+		mag, ok := chan.try_recv(chan_recv)
+		defer delete(mag)
 		if ok {
-			mag = arr
-
 			if auto_scale_y {
 				mag_max = math.F32_MIN
 				mag_min = math.F32_MAX
@@ -636,12 +649,12 @@ main :: proc() {
 			// average line plot
 			rl.DrawLineStrip(plot_line_pts, plot_line_pts_count, spec_line_color)
 
-			/* horizontal splitter */
+			/* horizontal splitter and axis */
 			start_pos: rl.Vector2 = {0, WINDOW_HEIGHT / 2}
 			end_pos: rl.Vector2 = {WINDOW_WIDTH, WINDOW_HEIGHT / 2}
 			rl.DrawLineV(start_pos, end_pos, rl.WHITE)
 
-			/* horizontal axis */
+			/* horizontal axis ticks and text */
 			xtick_lower: rl.Vector2 = {0, WINDOW_HEIGHT / 2 + xtick_len / 2}
 			xtick_upper: rl.Vector2 = {0, WINDOW_HEIGHT / 2 - xtick_len / 2}
 			for x in 0 ..< xtick_num {
@@ -662,9 +675,12 @@ main :: proc() {
 				frames_total_time := f64(time.tick_since(frames_start_time)) / 1.0e9
 				time_per_frame := frames_total_time / f64(frames_count)
 				fps = 1 / time_per_frame
-				fps_str = strings.clone_to_cstring(fmt.aprintf("FPS: %.1f", fps))
+				delete(fps_str)
+				fps_str = fmt.aprintf("FPS: %.1f", fps)
+				delete(fps_cstr)
+				fps_cstr = strings.clone_to_cstring(fps_str)
 			}
-			rl.DrawText(fps_str, 20, WINDOW_HEIGHT / 2 + 20, 20, rl.WHITE)
+			rl.DrawText(fps_cstr, 20, WINDOW_HEIGHT / 2 + 20, 20, rl.WHITE)
 
 			/* waterfall */
 			rl.DrawTexture(rt_wf.texture, spec_x, WINDOW_HEIGHT / 2 + spec_y + 30, rl.WHITE)
