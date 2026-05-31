@@ -6,6 +6,8 @@ package main
   * single spectrum pixels can be one pixel below lowest horizontal line
   * get NUM_CHANNELS from device
   * get SAMPLE_RATE from device
+  * check for worker task memory leaks
+  * center the colormap
 */
 
 MEMTRACK :: #config(MEMTRACK, false)
@@ -562,7 +564,7 @@ main :: proc() {
 	defer rl.UnloadRenderTexture(rt_wf_tmp)
 
 	// texture for colormap
-	rt_cm := rl.LoadRenderTexture(10, spec_h - 30)
+	rt_cm := rl.LoadRenderTexture(20, spec_h)
 	defer rl.UnloadRenderTexture(rt_cm)
 	// visualize colormap
 	rl.BeginTextureMode(rt_cm)
@@ -627,7 +629,7 @@ main :: proc() {
 				}
 				auto_scale_y = false
 
-				// update y-axis labels
+				// update spectrum y-axis labels
 				for y in 0 ..< spec_ytick_num {
 					yy := spec_ytick_num - 1 - y
 					db := f32(y) * (mag_max - mag_min) + mag_min
@@ -761,7 +763,7 @@ main :: proc() {
 			rl.DrawTexture(rt_wf.texture, spec_x, WINDOW_HEIGHT / 2 + spec_y + 30, rl.WHITE)
 
 			/* colormap */
-			rl.DrawTexture(rt_cm.texture, 5, WINDOW_HEIGHT / 2 + spec_y + 30, rl.WHITE)
+			rl.DrawTexture(rt_cm.texture, spec_x + spec_w + 10, spec_y, rl.WHITE)
 		}
 		rl.EndDrawing()
 	}
