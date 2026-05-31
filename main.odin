@@ -72,7 +72,7 @@ color_map :: proc(x: f32) -> (rgba: rl.Color) {
 	r, g, b: f32
 	if x < 0.33 {
 		x = x / 0.33
-		r = 0.05 * 0.2 * x
+		r = 0.05 + 0.2 * x
 		g = 0
 		b = 0.5 + 0.25 * x
 	} else if x < 0.66 {
@@ -81,7 +81,7 @@ color_map :: proc(x: f32) -> (rgba: rl.Color) {
 		g = 0
 		b = 0.75 - 0.5 * x
 	} else {
-		x = (x - 0.66) / 0.33
+		x = (x - 0.66) / 0.34
 		r = 0.75 + 0.25 * x
 		g = x
 		b = 0.25 - 0.25 * x
@@ -472,10 +472,26 @@ main :: proc() {
 	rl.InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Microphone Spectrum")
 	defer rl.CloseWindow()
 
-	rt := rl.LoadRenderTexture(spec_w, spec_h - 30)
-	rt_tmp := rl.LoadRenderTexture(rt.texture.width, rt.texture.height)
-	defer rl.UnloadRenderTexture(rt)
-	defer rl.UnloadRenderTexture(rt_tmp)
+	// texture for waterfall
+	rt_wf := rl.LoadRenderTexture(spec_w, spec_h - 30)
+	rt_wf_tmp := rl.LoadRenderTexture(rt_wf.texture.width, rt_wf.texture.height)
+	defer rl.UnloadRenderTexture(rt_wf)
+	defer rl.UnloadRenderTexture(rt_wf_tmp)
+
+	// texture for colormap
+	rt_cm := rl.LoadRenderTexture(10, spec_h - 30)
+	defer rl.UnloadRenderTexture(rt_cm)
+	// visualize colormap
+	rl.BeginTextureMode(rt_cm)
+	{
+		rl.ClearBackground(rl.BLANK)
+		for y in 0 ..< rt_cm.texture.height {
+			for x in 0 ..< rt_cm.texture.width {
+				rl.DrawPixel(i32(x), i32(y), color_map(f32(y) / f32(rt_cm.texture.height)))
+			}
+		}
+	}
+	rl.EndTextureMode()
 
 	rl.SetTargetFPS(rl_fps)
 
@@ -540,21 +556,21 @@ main :: proc() {
 			)
 
 			// draw texture one pixel down
-			rl.BeginTextureMode(rt_tmp)
+			rl.BeginTextureMode(rt_wf_tmp)
 			{
 				rl.ClearBackground(rl.BLANK)
-				rl.DrawTexture(rt.texture, 0, 1, rl.WHITE)
+				rl.DrawTexture(rt_wf.texture, 0, 1, rl.WHITE)
 			}
 			rl.EndTextureMode()
 
-			rl.BeginTextureMode(rt)
+			rl.BeginTextureMode(rt_wf)
 			{
 				// draw texture
-				rl.DrawTexture(rt_tmp.texture, 0, 0, rl.WHITE)
+				rl.DrawTexture(rt_wf_tmp.texture, 0, 0, rl.WHITE)
 				// draw a new line at the top
-				for x in 0 ..< rt.texture.width {
+				for x in 0 ..< rt_wf.texture.width {
 					x01 := plot_line_avg[x] / (spec_rec.height - 1)
-					rl.DrawPixel(x, rt.texture.height - 1, color_map(x01))
+					rl.DrawPixel(x, rt_wf.texture.height - 1, color_map(x01))
 				}
 			}
 			rl.EndTextureMode()
@@ -588,7 +604,10 @@ main :: proc() {
 			rl.DrawText(fps_str, 20, WINDOW_HEIGHT / 2 + 20, 20, rl.WHITE)
 
 			/* waterfall */
-			rl.DrawTexture(rt.texture, spec_x, WINDOW_HEIGHT / 2 + spec_y + 30, rl.WHITE)
+			rl.DrawTexture(rt_wf.texture, spec_x, WINDOW_HEIGHT / 2 + spec_y + 30, rl.WHITE)
+
+			/* colormap */
+			rl.DrawTexture(rt_cm.texture, 5, WINDOW_HEIGHT / 2 + spec_y + 30, rl.WHITE)
 		}
 		rl.EndDrawing()
 	}
