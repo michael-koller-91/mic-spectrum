@@ -55,6 +55,9 @@ Ring_Buffer :: struct {
 	count: int, // number of items in the buffer
 }
 
+/*
+A Blackman-Harris window of length `length`.
+*/
 blackman_harris_window :: proc(length: int) -> []f32 {
 	a0 :: 0.4243801
 	a1 :: 0.4973406
@@ -63,8 +66,8 @@ blackman_harris_window :: proc(length: int) -> []f32 {
 	win := make([]f32, length)
 	n := f32(length)
 	for i in 0 ..< n {
-		win[int(i)] =
-			a0 - a1 * math.cos_f32(2.0 * pi * i / n) + a2 * math.cos_f32(4.0 * pi * i / n)
+		theta := 2.0 * pi * i / n
+		win[int(i)] = a0 - a1 * math.cos_f32(theta) + a2 * math.cos_f32(2.0 * theta)
 	}
 	return win
 }
@@ -113,6 +116,9 @@ rb_make :: proc(rb: ^Ring_Buffer, cap: int) {
 	rb.count = 0
 }
 
+/*
+Delete the ring buffer.
+*/
 rb_delete :: proc(rb: ^Ring_Buffer) {
 	delete(rb.data)
 }
@@ -324,14 +330,17 @@ normalize :: proc(x, y, x_min, x_max, y_min, y_max: f32) -> (x01, y01: f32) {
 	return
 }
 
+/*
+Map the FFT values to pixels within the rectangle defined by `rec`.
+*/
 map_to_rec :: proc(
 	input: ^[]f32,
-	output_line_points: [^]rl.Vector2,
 	line_points_count: i32,
-	output_pixels: [^]rl.Vector2,
-	output_raw_avg: ^[]f32,
 	x_min, x_max, y_min, y_max: f32,
 	rec: rl.Rectangle,
+	output_line_points: [^]rl.Vector2,
+	output_pixels: [^]rl.Vector2,
+	output_raw_avg: ^[]f32,
 ) {
 	n_pts := len(input)
 
@@ -496,20 +505,28 @@ main :: proc() {
 	/* ------------------------- rl related ------------------------- */
 	rl_fps: i32 = 30
 
-	tick_color := rl.WHITE
+	text_color :: rl.WHITE
+	text_font_size: i32 = 14
+	tick_color :: text_color
 	tick_len: f32 = 10
-	tick_font_size: i32 = 14
+	yaxis_unit_x: i32 = 20
 
-	spec_x: i32 = 50
-	spec_y: i32 = 10
-	spec_h: i32 = WINDOW_HEIGHT / 2 - spec_y - 20
-	spec_w: i32 = WINDOW_WIDTH - spec_x - 40
+	spec_x: i32 = 90 // offset from left to where spectrum starts
+	spec_y: i32 = 20 // offset from top to where spectrum starts
+	spec_h: i32 = WINDOW_HEIGHT / 2 - 2 * spec_y
+	spec_w: i32 = WINDOW_WIDTH - spec_x - 80
 	spec_rec := rl.Rectangle{f32(spec_x), f32(spec_y), f32(spec_w), f32(spec_h)}
 
 	spec_bg_color := rl.Color{40, 40, 40, 255}
 	spec_grid_color :: rl.Color{100, 100, 100, 255}
 	spec_line_color :: rl.Color{250, 240, 0, 255}
 	spec_pixel_color :: rl.Color{250, 200, 0, 255}
+
+	spec_yaxis_unit_str := fmt.aprint("[dBFS]")
+	defer delete(spec_yaxis_unit_str)
+	spec_yaxis_unit_cstr := strings.clone_to_cstring(spec_yaxis_unit_str)
+	defer delete(spec_yaxis_unit_cstr)
+	spec_yaxis_unit_y: i32 = spec_y + spec_h / 2
 
 	plot_line_pts_count := i32(spec_rec.width)
 	plot_line_pts := make([^]rl.Vector2, plot_line_pts_count)
@@ -532,13 +549,18 @@ main :: proc() {
 		t := fmt.aprintf("%.0f", frequency)
 		xtick_text[x] = strings.clone_to_cstring(t)
 		delete(t)
-		xtick_text_len[x] = rl.MeasureText(xtick_text[x], tick_font_size) // needs to be called after rl.InitWindow
+		xtick_text_len[x] = rl.MeasureText(xtick_text[x], text_font_size) // needs to be called after rl.InitWindow
 	}
 	defer delete(xtick_text)
 	defer delete(xtick_text_len)
 	defer for x in 0 ..< xtick_num {
 		delete(xtick_text[x])
 	}
+
+	xaxis_unit_str := fmt.aprint("[Hz]")
+	defer delete(xaxis_unit_str)
+	xaxis_unit_cstr := strings.clone_to_cstring(xaxis_unit_str)
+	defer delete(xaxis_unit_cstr)
 
 	spec_ytick_num: i32 = 5
 	spec_ytick_text := make([]cstring, spec_ytick_num)
@@ -549,7 +571,7 @@ main :: proc() {
 		t := fmt.aprintf("%.1f", db)
 		spec_ytick_text[yy] = strings.clone_to_cstring(t)
 		delete(t)
-		spec_ytick_text_len[yy] = rl.MeasureText(spec_ytick_text[yy], tick_font_size) // needs to be called after rl.InitWindow
+		spec_ytick_text_len[yy] = rl.MeasureText(spec_ytick_text[yy], text_font_size) // needs to be called after rl.InitWindow
 	}
 	defer delete(spec_ytick_text)
 	defer delete(spec_ytick_text_len)
@@ -557,14 +579,27 @@ main :: proc() {
 		delete(spec_ytick_text[y])
 	}
 
+	wf_x := spec_x
+	wf_y: i32 = WINDOW_HEIGHT / 2 + spec_y + i32(tick_len / 2) + text_font_size
+
+	wf_yaxis_unit_str := fmt.aprint("[s]")
+	defer delete(wf_yaxis_unit_str)
+	wf_yaxis_unit_cstr := strings.clone_to_cstring(wf_yaxis_unit_str)
+	defer delete(wf_yaxis_unit_cstr)
+	wf_yaxis_unit_y: i32 = wf_y + spec_h / 2
+
 	// texture for waterfall
 	rt_wf := rl.LoadRenderTexture(spec_w, spec_h - 30)
 	rt_wf_tmp := rl.LoadRenderTexture(rt_wf.texture.width, rt_wf.texture.height)
 	defer rl.UnloadRenderTexture(rt_wf)
 	defer rl.UnloadRenderTexture(rt_wf_tmp)
 
+	cm_w: i32 = 40
+	cm_x: i32 = spec_x + spec_w + (WINDOW_WIDTH - spec_x - spec_w - cm_w) / 2
+	cm_y: i32 = spec_y
+
 	// texture for colormap
-	rt_cm := rl.LoadRenderTexture(20, spec_h)
+	rt_cm := rl.LoadRenderTexture(cm_w, spec_h)
 	defer rl.UnloadRenderTexture(rt_cm)
 	// visualize colormap
 	rl.BeginTextureMode(rt_cm)
@@ -627,6 +662,8 @@ main :: proc() {
 						mag_max = m
 					}
 				}
+				mag_max *= 0.9
+				mag_min *= 1.1
 				auto_scale_y = false
 
 				// update spectrum y-axis labels
@@ -637,21 +674,21 @@ main :: proc() {
 					delete(spec_ytick_text[yy])
 					spec_ytick_text[yy] = strings.clone_to_cstring(t)
 					delete(t)
-					spec_ytick_text_len[yy] = rl.MeasureText(spec_ytick_text[yy], tick_font_size)
+					spec_ytick_text_len[yy] = rl.MeasureText(spec_ytick_text[yy], text_font_size)
 				}
 			}
 
 			map_to_rec(
 				&mag,
-				plot_line_pts,
 				plot_line_pts_count,
-				plot_pixels,
-				&plot_line_avg,
 				0,
 				f32(len(mag)),
 				mag_min,
 				mag_max,
 				spec_rec,
+				plot_line_pts,
+				plot_pixels,
+				&plot_line_avg,
 			)
 
 			// draw texture one pixel down
@@ -682,6 +719,23 @@ main :: proc() {
 			/* spectrum rectangle */
 			rl.DrawRectangleRec(spec_rec, spec_bg_color)
 
+			/* [dBFS] */
+			dbfs_pos := rl.Vector2{f32(yaxis_unit_x), f32(spec_yaxis_unit_y)}
+			dbfs_orig := rl.Vector2 {
+				f32(rl.MeasureText(spec_yaxis_unit_cstr, text_font_size)) / 2,
+				f32(text_font_size) / 2,
+			}
+			rl.DrawTextPro(
+				rl.GetFontDefault(),
+				spec_yaxis_unit_cstr,
+				dbfs_pos,
+				dbfs_orig,
+				-90,
+				f32(text_font_size),
+				2.0,
+				text_color,
+			)
+
 			/* horizontal splitter and axis */
 			start_pos: rl.Vector2 = {0, WINDOW_HEIGHT / 2}
 			end_pos: rl.Vector2 = {WINDOW_WIDTH, WINDOW_HEIGHT / 2}
@@ -697,8 +751,8 @@ main :: proc() {
 				rl.DrawText(
 					xtick_text[x],
 					i32(xtick_lower.x) - xtick_text_len[x] / 2,
-					i32(xtick_lower.y) + tick_font_size / 2,
-					tick_font_size,
+					i32(xtick_lower.y) + text_font_size / 2,
+					text_font_size,
 					tick_color,
 				)
 				// grid
@@ -712,6 +766,16 @@ main :: proc() {
 				// tick
 				rl.DrawLineV(xtick_lower, xtick_upper, tick_color)
 			}
+			// unit
+			rl.DrawText(
+				xaxis_unit_cstr,
+				i32(
+					f32(WINDOW_WIDTH) - 1.5 * f32(rl.MeasureText(xaxis_unit_cstr, text_font_size)),
+				),
+				i32(xtick_lower.y) + text_font_size / 2,
+				text_font_size,
+				text_color,
+			)
 
 			/* vertical spectrum grid */
 			ytick_left: rl.Vector2 = {f32(spec_x) - tick_len / 2, 0}
@@ -730,9 +794,9 @@ main :: proc() {
 				// text
 				rl.DrawText(
 					spec_ytick_text[y],
-					i32(ytick_left.x) - spec_ytick_text_len[y] - tick_font_size / 2,
-					i32(ytick_left.y) - tick_font_size / 2,
-					tick_font_size,
+					i32(ytick_left.x) - spec_ytick_text_len[y] - text_font_size / 2,
+					i32(ytick_left.y) - text_font_size / 2,
+					text_font_size,
 					tick_color,
 				)
 				// tick
@@ -757,13 +821,36 @@ main :: proc() {
 				delete(fps_cstr)
 				fps_cstr = strings.clone_to_cstring(fps_str)
 			}
-			rl.DrawText(fps_cstr, 20, WINDOW_HEIGHT / 2 + 20, 20, rl.WHITE)
+			rl.DrawText(
+				fps_cstr,
+				WINDOW_WIDTH - 90,
+				WINDOW_HEIGHT - 20,
+				text_font_size,
+				text_color,
+			)
 
 			/* waterfall */
-			rl.DrawTexture(rt_wf.texture, spec_x, WINDOW_HEIGHT / 2 + spec_y + 30, rl.WHITE)
+			rl.DrawTexture(rt_wf.texture, wf_x, wf_y, rl.WHITE)
+
+			/* [s] */
+			s_pos := rl.Vector2{f32(yaxis_unit_x), f32(wf_yaxis_unit_y)}
+			s_orig := rl.Vector2 {
+				f32(rl.MeasureText(wf_yaxis_unit_cstr, text_font_size)) / 2,
+				f32(text_font_size) / 2,
+			}
+			rl.DrawTextPro(
+				rl.GetFontDefault(),
+				wf_yaxis_unit_cstr,
+				s_pos,
+				s_orig,
+				-90,
+				f32(text_font_size),
+				2.0,
+				text_color,
+			)
 
 			/* colormap */
-			rl.DrawTexture(rt_cm.texture, spec_x + spec_w + 10, spec_y, rl.WHITE)
+			rl.DrawTexture(rt_cm.texture, cm_x, cm_y, rl.WHITE)
 		}
 		rl.EndDrawing()
 	}
