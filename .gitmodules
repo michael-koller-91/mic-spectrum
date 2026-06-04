@@ -1,0 +1,3 @@
+[submodule "fftw3-odin-bindings"]
+	path = fftw3-odin-bindings
+	url = ./fftw3-odin-bindings
