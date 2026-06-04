@@ -1,4 +1,4 @@
-# Record and Playback
+# Microphone Spectrum
 
 Show your microphone's spectrum and a corresponding waterfall.
 
