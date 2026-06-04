@@ -1,13 +1,12 @@
 package main
 
 /* TODO:
-  * compute waterfall and spectrum pixels in worker task?
   * vertical grid seems to be off by one pixel
   * single spectrum pixels can be one pixel below lowest horizontal line
-  * get NUM_CHANNELS from device
-  * get SAMPLE_RATE from device
+  * get NUM_CHANNELS from device?
+  * get SAMPLE_RATE from device?
+  * is the frequency axis correct if NUM_CHANNELS > 2?
   * check for worker task memory leaks
-  * center the colormap
 */
 
 MEMTRACK :: #config(MEMTRACK, false)
@@ -240,12 +239,13 @@ dsp :: proc(task: thread.Task) {
 			/* FFT */
 			fftw3.fftwf_execute_dft_r2c(plan_forward, buf_x, buf_X)
 
-			/* convert to dB */
+			/* convert to dBFS */
 			to_send := make([]f32, FFT_SIZE_C)
 			for i in 0 ..< FFT_SIZE_C {
 				to_send[i] = 20.0 * math.log10(fftw3.abs(buf_X[i]) + 1e-15)
 			}
 
+			/* send to main process */
 			if chan.len(chan_send) < CHAN_CAPACITY - 2 {
 				success := chan.send(chan_send, to_send)
 				if !success {
@@ -505,6 +505,8 @@ main :: proc() {
 	/* ------------------------- rl related ------------------------- */
 	rl_fps: i32 = 30
 
+	grid_color :: rl.Color{100, 100, 100, 180}
+	plot_bg_color := rl.Color{40, 40, 40, 255}
 	text_color :: rl.WHITE
 	text_font_size: i32 = 14
 	tick_color :: text_color
@@ -517,8 +519,6 @@ main :: proc() {
 	spec_w: i32 = WINDOW_WIDTH - spec_x - 80
 	spec_rec := rl.Rectangle{f32(spec_x), f32(spec_y), f32(spec_w), f32(spec_h)}
 
-	spec_bg_color := rl.Color{40, 40, 40, 255}
-	spec_grid_color :: rl.Color{100, 100, 100, 255}
 	spec_line_color :: rl.Color{250, 240, 0, 255}
 	spec_pixel_color :: rl.Color{250, 200, 0, 255}
 
@@ -597,6 +597,26 @@ main :: proc() {
 	cm_w: i32 = 40
 	cm_x: i32 = spec_x + spec_w + (WINDOW_WIDTH - spec_x - spec_w - cm_w) / 2
 	cm_y: i32 = spec_y
+
+	time_per_slice: f32 = f32(NUM_CHANNELS) * f32(FFT_SIZE_R) / 2 / f32(SAMPLE_RATE) // time between two STFT slices
+	time_tot_wf: f32 = f32(rt_wf.texture.height) * time_per_slice // how much time the whole waterfall displays
+	time_tot: f32 = math.floor(time_tot_wf)
+	wf_ytick_num := i32(math.floor(time_tot_wf / 2) + 1) // one label every 2 seconds + second 0
+
+	wf_ytick_text := make([]cstring, wf_ytick_num)
+	wf_ytick_text_len := make([]i32, wf_ytick_num)
+	for y in 0 ..< wf_ytick_num {
+		seconds := y * 2
+		t := fmt.aprintf("%v", seconds)
+		wf_ytick_text[y] = strings.clone_to_cstring(t)
+		delete(t)
+		wf_ytick_text_len[y] = rl.MeasureText(wf_ytick_text[y], text_font_size) // needs to be called after rl.InitWindow
+	}
+	defer delete(wf_ytick_text)
+	defer delete(wf_ytick_text_len)
+	defer for y in 0 ..< wf_ytick_num {
+		delete(wf_ytick_text[y])
+	}
 
 	// texture for colormap
 	rt_cm := rl.LoadRenderTexture(cm_w, spec_h)
@@ -717,7 +737,7 @@ main :: proc() {
 			rl.ClearBackground(rl.BLACK)
 
 			/* spectrum rectangle */
-			rl.DrawRectangleRec(spec_rec, spec_bg_color)
+			rl.DrawRectangleRec(spec_rec, plot_bg_color)
 
 			/* [dBFS] */
 			dbfs_pos := rl.Vector2{f32(yaxis_unit_x), f32(spec_yaxis_unit_y)}
@@ -755,18 +775,18 @@ main :: proc() {
 					text_font_size,
 					tick_color,
 				)
-				// grid
+				// vertical grid
 				rl.DrawLine(
 					i32(xtick_lower.x),
 					spec_y,
 					i32(xtick_lower.x),
 					spec_y + spec_h,
-					spec_grid_color,
+					grid_color,
 				)
 				// tick
 				rl.DrawLineV(xtick_lower, xtick_upper, tick_color)
 			}
-			// unit
+			// [Hz]
 			rl.DrawText(
 				xaxis_unit_cstr,
 				i32(
@@ -777,19 +797,19 @@ main :: proc() {
 				text_color,
 			)
 
-			/* vertical spectrum grid */
+			/* spectrum y-axis labels */
 			ytick_left: rl.Vector2 = {f32(spec_x) - tick_len / 2, 0}
 			ytick_right: rl.Vector2 = {f32(spec_x) + tick_len / 2, 0}
 			for y in 0 ..< spec_ytick_num {
 				ytick_left.y = f32(spec_y) + f32(y) * f32(spec_h) / f32(spec_ytick_num - 1)
 				ytick_right.y = f32(spec_y) + f32(y) * f32(spec_h) / f32(spec_ytick_num - 1)
-				// grid
+				// horizontal grid
 				rl.DrawLine(
 					spec_x,
 					i32(ytick_left.y),
 					spec_x + spec_w,
 					i32(ytick_left.y),
-					spec_grid_color,
+					grid_color,
 				)
 				// text
 				rl.DrawText(
@@ -829,8 +849,45 @@ main :: proc() {
 				text_color,
 			)
 
+			/* box behind waterfall */
+			rl.DrawRectangle(wf_x, wf_y, rt_wf.texture.width, rt_wf.texture.height, plot_bg_color)
+
 			/* waterfall */
 			rl.DrawTexture(rt_wf.texture, wf_x, wf_y, rl.WHITE)
+
+			/* waterfall times */
+			ytick_left = {f32(wf_x) - tick_len / 2, 0}
+			ytick_right = {f32(wf_x) + tick_len / 2, 0}
+			y_2_seconds := math.round(f32(rt_wf.texture.height) * 2.0 / time_tot_wf)
+			for y in 0 ..< wf_ytick_num {
+				ytick_left.y = f32(wf_y) + f32(y) * y_2_seconds
+				ytick_right.y = f32(wf_y) + f32(y) * y_2_seconds
+				// grid
+				rl.DrawLine(
+					wf_x,
+					i32(ytick_left.y),
+					wf_x + rt_wf.texture.width,
+					i32(ytick_left.y),
+					grid_color,
+				)
+				// text
+				rl.DrawText(
+					wf_ytick_text[y],
+					i32(ytick_left.x) - wf_ytick_text_len[y] - text_font_size / 2,
+					i32(ytick_left.y) - text_font_size / 2,
+					text_font_size,
+					tick_color,
+				)
+				// tick
+				rl.DrawLineV(ytick_left, ytick_right, tick_color)
+			}
+
+			/* waterfall vertical grid */
+			xpos: f32
+			for x in 0 ..< xtick_num {
+				xpos = f32(wf_x) + f32(x) * f32(rt_wf.texture.width) / f32(xtick_num - 1)
+				rl.DrawLine(i32(xpos), wf_y, i32(xpos), wf_y + rt_wf.texture.height, grid_color)
+			}
 
 			/* [s] */
 			s_pos := rl.Vector2{f32(yaxis_unit_x), f32(wf_yaxis_unit_y)}
