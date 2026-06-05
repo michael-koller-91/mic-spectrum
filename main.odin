@@ -7,8 +7,8 @@ package main
   * get SAMPLE_RATE from device?
   * is the frequency axis correct if NUM_CHANNELS > 2?
   * check for worker task memory leaks
-  * use font_size in LoadFontEx
   * check if h1, h2, h3 are only used as f32
+  * replace rl.MeasreText with rl.MeasureTextEx
 */
 
 MEMTRACK :: #config(MEMTRACK, false)
@@ -507,9 +507,7 @@ main :: proc() {
 	/* ------------------------- rl related ------------------------- */
 	rl_fps: i32 = 30
 
-	font_size: i32 = 14
-	font_str := "DMMono-Regular.ttf"
-	font_cstr := strings.clone_to_cstring(font_str)
+	font_cstr := strings.clone_to_cstring("DMMono-Regular.ttf")
 	defer delete(font_cstr)
 
 	// heights of the three displayed sections
@@ -524,17 +522,16 @@ main :: proc() {
 	tick_len: f32 = 10
 	yaxis_unit_x: i32 = 20
 
-	spec_x: i32 = 90 // offset from left to where spectrum starts
+	spec_x: i32 = 100 // offset from left to where spectrum starts
 	spec_y: i32 = h1 + 20 // offset from top to where spectrum starts
-	spec_h: i32 = WINDOW_HEIGHT / 2 - 2 * spec_y
+	spec_h: i32 = h2 - 40
 	spec_w: i32 = WINDOW_WIDTH - spec_x - 80
 	spec_rec := rl.Rectangle{f32(spec_x), f32(spec_y), f32(spec_w), f32(spec_h)}
 
 	spec_line_color :: rl.Color{250, 240, 0, 255}
 	spec_pixel_color :: rl.Color{250, 200, 0, 255}
 
-	spec_yaxis_unit_str := "[dBFS]"
-	spec_yaxis_unit_cstr := strings.clone_to_cstring(spec_yaxis_unit_str)
+	spec_yaxis_unit_cstr := strings.clone_to_cstring("[dBFS]")
 	defer delete(spec_yaxis_unit_cstr)
 	spec_yaxis_unit_y: i32 = spec_y + spec_h / 2
 
@@ -574,8 +571,7 @@ main :: proc() {
 		delete(xtick_text[x])
 	}
 
-	xaxis_unit_str := "[Hz]"
-	xaxis_unit_cstr := strings.clone_to_cstring(xaxis_unit_str)
+	xaxis_unit_cstr := strings.clone_to_cstring("[Hz]")
 	defer delete(xaxis_unit_cstr)
 
 	spec_ytick_num: i32 = 5
@@ -584,7 +580,7 @@ main :: proc() {
 	for y in 0 ..< spec_ytick_num {
 		yy := spec_ytick_num - 1 - y
 		db := f32(y) * (mag_max_default - mag_min_default) + mag_min_default
-		t := fmt.aprintf("%.1f", db)
+		t := fmt.aprintf("%.0f", db)
 		spec_ytick_text[yy] = strings.clone_to_cstring(t)
 		delete(t)
 		spec_ytick_text_len[yy] = f32(rl.MeasureText(spec_ytick_text[yy], font.baseSize)) // needs to be called after rl.InitWindow
@@ -596,15 +592,14 @@ main :: proc() {
 	}
 
 	wf_x := spec_x
-	wf_y: i32 = WINDOW_HEIGHT / 2 + spec_y + i32(tick_len / 2) + font_size
+	wf_y: i32 = h1 + h2 + 20 + i32(tick_len / 2) + font.baseSize
 
-	wf_yaxis_unit_str := "[s]"
-	wf_yaxis_unit_cstr := strings.clone_to_cstring(wf_yaxis_unit_str)
+	wf_yaxis_unit_cstr := strings.clone_to_cstring("[s]")
 	defer delete(wf_yaxis_unit_cstr)
 	wf_yaxis_unit_y: i32 = wf_y + spec_h / 2
 
 	// texture for waterfall
-	rt_wf := rl.LoadRenderTexture(spec_w, spec_h - 30)
+	rt_wf := rl.LoadRenderTexture(spec_w, spec_h - 20)
 	rt_wf_tmp := rl.LoadRenderTexture(rt_wf.texture.width, rt_wf.texture.height)
 	defer rl.UnloadRenderTexture(rt_wf)
 	defer rl.UnloadRenderTexture(rt_wf_tmp)
@@ -619,22 +614,23 @@ main :: proc() {
 	wf_ytick_num := i32(math.floor(time_tot_wf / 2) + 1) // one label every 2 seconds + second 0
 
 	wf_ytick_text := make([]cstring, wf_ytick_num)
-	wf_ytick_text_len := make([]f32, wf_ytick_num)
+	wf_ytick_meas := make([]rl.Vector2, wf_ytick_num)
 	for y in 0 ..< wf_ytick_num {
 		seconds := y * 2
-		t := fmt.aprintf("%v", seconds)
+		t := fmt.aprintf("%d", seconds)
 		wf_ytick_text[y] = strings.clone_to_cstring(t)
 		delete(t)
-		wf_ytick_text_len[y] = f32(rl.MeasureText(wf_ytick_text[y], font.baseSize)) // needs to be called after rl.InitWindow
+		wf_ytick_meas[y] = rl.MeasureTextEx(font, wf_ytick_text[y], f32(font.baseSize), 0.0)
 	}
 	defer delete(wf_ytick_text)
-	defer delete(wf_ytick_text_len)
+	defer delete(wf_ytick_meas)
 	defer for y in 0 ..< wf_ytick_num {
 		delete(wf_ytick_text[y])
 	}
 
-	keybindings_str := "[SPACE]: capturing is active while held | [a] auto-scale y-axis | [r] reset y-axis | [ESC] exit"
-	keybindings_cstr := strings.clone_to_cstring(keybindings_str)
+	keybindings_cstr := strings.clone_to_cstring(
+		"[SPACE]: capturing is active while held | [a] auto-scale y-axis | [r] reset y-axis | [ESC] exit",
+	)
 	defer delete(keybindings_cstr)
 
 	// texture for colormap
@@ -657,9 +653,10 @@ main :: proc() {
 	/* ------------------------- main loop ------------------------- */
 	auto_scale_y := false
 	capturing := false
+	update_ylabels := false
 
 	fps: f64 = 0.0
-	fps_str := fmt.aprintf("FPS: %.2f", fps)
+	fps_str := fmt.aprintf("FPS: %.1f", fps)
 	defer delete(fps_str)
 	fps_cstr := strings.clone_to_cstring(fps_str)
 	defer delete(fps_cstr)
@@ -679,10 +676,12 @@ main :: proc() {
 		}
 		if rl.IsKeyPressed(.A) {
 			auto_scale_y = true
+			update_ylabels = true
 		}
 		if rl.IsKeyPressed(.R) {
 			mag_max = mag_max_default
 			mag_min = mag_min_default
+			update_ylabels = true
 		}
 
 		mag, ok := chan.try_recv(chan_recv)
@@ -702,12 +701,14 @@ main :: proc() {
 				mag_max *= 0.9
 				mag_min *= 1.1
 				auto_scale_y = false
+			}
 
+			if update_ylabels {
 				// update spectrum y-axis labels
 				for y in 0 ..< spec_ytick_num {
 					yy := spec_ytick_num - 1 - y
 					db := f32(y) * (mag_max - mag_min) + mag_min
-					t := fmt.aprintf("%.1f", db)
+					t := fmt.aprintf("%.0f", db)
 					delete(spec_ytick_text[yy])
 					spec_ytick_text[yy] = strings.clone_to_cstring(t)
 					delete(t)
@@ -715,6 +716,7 @@ main :: proc() {
 						rl.MeasureText(spec_ytick_text[yy], font.baseSize),
 					)
 				}
+				update_ylabels = false
 			}
 
 			map_to_rec(
@@ -795,8 +797,8 @@ main :: proc() {
 
 			/* [dBFS] */
 			dbfs_orig := rl.Vector2 {
-				f32(rl.MeasureText(spec_yaxis_unit_cstr, font_size)) / 2,
-				f32(font_size) / 2,
+				f32(rl.MeasureText(spec_yaxis_unit_cstr, font.baseSize)) / 2,
+				f32(font.baseSize) / 2,
 			}
 			rl.DrawTextPro(
 				font,
@@ -922,8 +924,8 @@ main :: proc() {
 					font,
 					wf_ytick_text[y],
 					rl.Vector2 {
-						ytick_left.x - wf_ytick_text_len[y] - f32(font.baseSize) / 2,
-						ytick_left.y - f32(font.baseSize) / 2,
+						ytick_left.x - wf_ytick_meas[y].x - f32(font.baseSize) / 2,
+						ytick_left.y - wf_ytick_meas[y].y / 2,
 					},
 					f32(font.baseSize),
 					0.0,
@@ -943,8 +945,8 @@ main :: proc() {
 			/* [s] */
 			s_pos := rl.Vector2{f32(yaxis_unit_x), f32(wf_yaxis_unit_y)}
 			s_orig := rl.Vector2 {
-				f32(rl.MeasureText(wf_yaxis_unit_cstr, font_size)) / 2,
-				f32(font_size) / 2,
+				f32(rl.MeasureText(wf_yaxis_unit_cstr, font.baseSize)) / 2,
+				f32(font.baseSize) / 2,
 			}
 			rl.DrawTextPro(
 				font,
