@@ -3,14 +3,13 @@ package main
 /* TODO:
   * vertical grid seems to be off by one pixel
   * single spectrum pixels can be one pixel below lowest horizontal line
-  * get NUM_CHANNELS from device?
-  * get SAMPLE_RATE from device?
-  * is the frequency axis correct if NUM_CHANNELS > 2?
 */
 
 /*NOTE:
   * anything font-related needs to be called after rl.InitWindow
   * anything texture-related needs to be called after rl.InitWindow
+  * averaging the channels does not seem to be a good idea (at least with my mic), so 1 channel for now
+    * some kind of phase alignment prior to averaging would be necessary
 */
 
 MEMTRACK :: #config(MEMTRACK, false)
@@ -32,9 +31,6 @@ import rl "vendor:raylib"
 CHAN_CAPACITY :: 5
 FFT_SIZE_R :: 4096
 FFT_SIZE_C :: FFT_SIZE_R / 2 + 1
-NUM_CHANNELS :: 2
-NUM_THREADS :: 1
-SAMPLE_RATE :: 44100
 WINDOW_HEIGHT :: 800
 WINDOW_WIDTH :: 1000
 
@@ -44,7 +40,7 @@ ChanTypeMain :: []f32 // from DSP thread to main
 DSP_Data :: struct {
 	chan_callback: chan.Chan(ChanTypeCallback),
 	chan_main:     chan.Chan(ChanTypeMain),
-	frame_count:   u32,
+	num_channels:  int,
 }
 
 Capture_Data :: struct {
@@ -161,17 +157,17 @@ rb_empty_slots :: proc(rb: ^Ring_Buffer) -> int {
 /*
 Append a whole array to the ring buffer.
 */
-rb_append :: proc(rb: ^Ring_Buffer, arr: ^[]f32) -> (success: bool) {
+rb_append :: proc(rb: ^Ring_Buffer, arr: ^[]f32, num_channels: int) -> (success: bool) {
 	success = false
-	sample_count := len(arr) / NUM_CHANNELS
+	sample_count := len(arr) / num_channels
 	if rb_empty_slots(rb) < sample_count {
 		return
 	}
 	for i in 0 ..< sample_count {
 		average: f32 = 0
 		// average accross the channels
-		for j in 0 ..< NUM_CHANNELS {
-			average += arr[i * NUM_CHANNELS + j] / NUM_CHANNELS
+		for j in 0 ..< num_channels {
+			average += arr[i * num_channels + j] / f32(num_channels)
 		}
 		rb_push(rb, average)
 	}
@@ -219,7 +215,7 @@ dsp :: proc(task: thread.Task) {
 	dsp_data := cast(^DSP_Data)task.data
 	chan_recv := chan.as_recv(dsp_data.chan_callback) // receive from capture callback
 	chan_send := chan.as_send(dsp_data.chan_main) // send to main thread
-	frame_count := int(dsp_data.frame_count)
+	num_channels := int(dsp_data.num_channels)
 
 	buf_x := make([^]f32, FFT_SIZE_R)
 	buf_X := make([^]fftw3.fftwf_complex, FFT_SIZE_C)
@@ -243,7 +239,7 @@ dsp :: proc(task: thread.Task) {
 			break
 		}
 
-		could_append := rb_append(rb, &arr)
+		could_append := rb_append(rb, &arr, num_channels)
 		if !could_append {
 			fmt.printfln("[Task(%v)] ring-buffer too full, dropped data", task.user_index)
 		}
@@ -491,8 +487,8 @@ main :: proc() {
 	capture_config := ma.device_config_init(.capture)
 	capture_config.dataCallback = capture_callback
 	capture_config.capture.format = .f32
-	capture_config.capture.channels = NUM_CHANNELS
-	capture_config.sampleRate = SAMPLE_RATE
+	capture_config.capture.channels = 1 // see NOTE
+	capture_config.sampleRate = 0 // let ma choose the native sample rate
 
 	capture_device: ma.device
 	result = ma.device_init(nil, &capture_config, &capture_device)
@@ -505,33 +501,26 @@ main :: proc() {
 	defer log.debug("Uninitialized capture_device")
 
 	frame_count := capture_device.capture.internalPeriodSizeInFrames
+	num_channels := int(capture_device.capture.internalChannels)
+	sample_rate := capture_device.capture.internalSampleRate
 	fmt.println("frame_count:", frame_count)
+	fmt.println("num_channels:", num_channels)
+	fmt.println("sample rate:", sample_rate)
 
 	capture_data: Capture_Data
 	capture_data.chan_callback = chan_callback
-
 	capture_device.pUserData = &capture_data
-
-	// When device is started for the first time, it outputs ones followed by minus ones.
-	// By briefly starting the device here, we skip this initialization phase.
-	device_start(&capture_device)
-	time.sleep(2_000_000)
-	device_stop(&capture_device)
 
 	/* ------------------------- thread related ------------------------- */
 	pool: thread.Pool
-	thread.pool_init(&pool, context.allocator, NUM_THREADS)
+	thread.pool_init(&pool, context.allocator, 1)
 	defer thread.pool_destroy(&pool)
-
-	dsp_data: [NUM_THREADS]DSP_Data
-	for i in 0 ..< NUM_THREADS {
-		dsp_data[i] = {
-			chan_callback = chan_callback,
-			chan_main     = chan_main,
-			frame_count   = frame_count,
-		}
-		thread.pool_add_task(&pool, context.allocator, dsp, &dsp_data[i], i)
+	dsp_data := DSP_Data {
+		chan_callback = chan_callback,
+		chan_main     = chan_main,
+		num_channels  = num_channels,
 	}
+	thread.pool_add_task(&pool, context.allocator, dsp, &dsp_data, 0)
 
 	thread.pool_start(&pool)
 
@@ -591,7 +580,7 @@ main :: proc() {
 	xtick_text := make([]cstring, xtick_num)
 	xtick_text_len := make([]rl.Vector2, xtick_num)
 	for x in 0 ..< xtick_num {
-		frequency := f32(x) * f32(SAMPLE_RATE) / 2 / f32(xtick_num - 1)
+		frequency := f32(x) * f32(sample_rate) / 2 / f32(xtick_num - 1)
 		t := fmt.aprintf("%.0f", frequency)
 		xtick_text[x] = strings.clone_to_cstring(t)
 		delete(t)
@@ -646,7 +635,7 @@ main :: proc() {
 	cm_x: i32 = spec_x + spec_w + (WINDOW_WIDTH - spec_x - spec_w - cm_w) / 2
 	cm_y: i32 = spec_y
 
-	time_per_slice: f32 = f32(NUM_CHANNELS) * f32(FFT_SIZE_R) / 2 / f32(SAMPLE_RATE) // time between two STFT slices
+	time_per_slice: f32 = f32(num_channels) * f32(FFT_SIZE_R) / 2 / f32(sample_rate) // time between two STFT slices
 	time_tot_wf: f32 = f32(rt_wf.texture.height) * time_per_slice // how much time the whole waterfall displays
 	time_tot: f32 = math.floor(time_tot_wf)
 	wf_ytick_num := i32(math.floor(time_tot_wf / 2) + 1) // one label every 2 seconds + second 0
