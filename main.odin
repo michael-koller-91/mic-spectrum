@@ -6,12 +6,11 @@ package main
   * get NUM_CHANNELS from device?
   * get SAMPLE_RATE from device?
   * is the frequency axis correct if NUM_CHANNELS > 2?
-  * check for worker task memory leaks
-  * check if h1, h2, h3 are only used as f32
 */
 
 /*NOTE:
   * anything font-related needs to be called after rl.InitWindow
+  * anything texture-related needs to be called after rl.InitWindow
 */
 
 MEMTRACK :: #config(MEMTRACK, false)
@@ -39,10 +38,10 @@ SAMPLE_RATE :: 44100
 WINDOW_HEIGHT :: 800
 WINDOW_WIDTH :: 1000
 
-ChanTypeCallback :: []f32 // from capture callback to task thread
-ChanTypeMain :: []f32 // from task thread to main
+ChanTypeCallback :: []f32 // from capture callback to DSP thread
+ChanTypeMain :: []f32 // from DSP thread to main
 
-Task_Data :: struct {
+DSP_Data :: struct {
 	chan_callback: chan.Chan(ChanTypeCallback),
 	chan_main:     chan.Chan(ChanTypeMain),
 	frame_count:   u32,
@@ -181,17 +180,46 @@ rb_append :: proc(rb: ^Ring_Buffer, arr: ^[]f32) -> (success: bool) {
 }
 
 /*
-The Worker Task.
-Process the microphone samples to produce spectrum values.
+The DSP thread processes the microphone samples to produce spectrum values.
 */
 dsp :: proc(task: thread.Task) {
 	fmt.printfln("[Task(%v)] start working", task.user_index)
 	defer fmt.printfln("[Task(%v)] stop working", task.user_index)
 
-	task_data := cast(^Task_Data)task.data
-	chan_recv := chan.as_recv(task_data.chan_callback)
-	chan_send := chan.as_send(task_data.chan_main)
-	frame_count := int(task_data.frame_count)
+	when MEMTRACK {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.temp_allocator)
+		context.temp_allocator = mem.tracking_allocator(&track)
+
+		defer {
+			if len(track.allocation_map) > 0 {
+				fmt.eprintf(
+					"[Task(%v)] === %v context.temp_allocator allocations not freed: ===\n",
+					task.user_index,
+					len(track.allocation_map),
+				)
+				for _, entry in track.allocation_map {
+					fmt.eprintf(
+						"(%v) - %v bytes @ %v\n",
+						task.user_index,
+						entry.size,
+						entry.location,
+					)
+				}
+			} else {
+				fmt.printfln(
+					"[Task(%v)] === context.temp_allocator tracking was active (no missed frees) ===",
+					task.user_index,
+				)
+			}
+			mem.tracking_allocator_destroy(&track)
+		}
+	}
+
+	dsp_data := cast(^DSP_Data)task.data
+	chan_recv := chan.as_recv(dsp_data.chan_callback) // receive from capture callback
+	chan_send := chan.as_send(dsp_data.chan_main) // send to main thread
+	frame_count := int(dsp_data.frame_count)
 
 	buf_x := make([^]f32, FFT_SIZE_R)
 	buf_X := make([^]fftw3.fftwf_complex, FFT_SIZE_C)
@@ -250,7 +278,7 @@ dsp :: proc(task: thread.Task) {
 				to_send[i] = 20.0 * math.log10(fftw3.abs(buf_X[i]) + 1e-15)
 			}
 
-			/* send to main process */
+			/* send to main thread */
 			if chan.len(chan_send) < CHAN_CAPACITY - 2 {
 				success := chan.send(chan_send, to_send)
 				if !success {
@@ -495,14 +523,14 @@ main :: proc() {
 	thread.pool_init(&pool, context.allocator, NUM_THREADS)
 	defer thread.pool_destroy(&pool)
 
-	task_data: [NUM_THREADS]Task_Data
+	dsp_data: [NUM_THREADS]DSP_Data
 	for i in 0 ..< NUM_THREADS {
-		task_data[i] = {
+		dsp_data[i] = {
 			chan_callback = chan_callback,
 			chan_main     = chan_main,
 			frame_count   = frame_count,
 		}
-		thread.pool_add_task(&pool, context.allocator, dsp, &task_data[i], i)
+		thread.pool_add_task(&pool, context.allocator, dsp, &dsp_data[i], i)
 	}
 
 	thread.pool_start(&pool)
@@ -524,7 +552,7 @@ main :: proc() {
 	text_color :: rl.WHITE
 	tick_color :: text_color
 	tick_len: f32 = 10
-	yaxis_unit_x: i32 = 20
+	yaxis_unit_x: i32 = 30
 
 	spec_x: i32 = 100 // offset from left to where spectrum starts
 	spec_y: i32 = h1 + 20 // offset from top to where spectrum starts
@@ -604,15 +632,15 @@ main :: proc() {
 	wf_x := spec_x
 	wf_y: i32 = h1 + h2 + 20 + i32(tick_len / 2) + font.baseSize
 
-	wf_yaxis_unit_cstr := strings.clone_to_cstring("[s]")
-	defer delete(wf_yaxis_unit_cstr)
-	wf_yaxis_unit_y: i32 = wf_y + spec_h / 2
-
 	// texture for waterfall
-	rt_wf := rl.LoadRenderTexture(spec_w, spec_h - 20)
+	rt_wf := rl.LoadRenderTexture(spec_w, h3 - (wf_y - h1 - h2) - 20)
 	rt_wf_tmp := rl.LoadRenderTexture(rt_wf.texture.width, rt_wf.texture.height)
 	defer rl.UnloadRenderTexture(rt_wf)
 	defer rl.UnloadRenderTexture(rt_wf_tmp)
+
+	wf_yaxis_unit_cstr := strings.clone_to_cstring("[s]")
+	defer delete(wf_yaxis_unit_cstr)
+	wf_yaxis_unit_y: i32 = wf_y + rt_wf.texture.height / 2
 
 	cm_w: i32 = 40
 	cm_x: i32 = spec_x + spec_w + (WINDOW_WIDTH - spec_x - spec_w - cm_w) / 2
@@ -630,7 +658,12 @@ main :: proc() {
 		t := fmt.aprintf("%d", seconds)
 		wf_ytick_text[y] = strings.clone_to_cstring(t)
 		delete(t)
-		wf_ytick_meas[y] = rl.MeasureTextEx(font, wf_ytick_text[y], f32(font.baseSize), 0.0)
+		wf_ytick_meas[y] = rl.MeasureTextEx(
+			font,
+			wf_ytick_text[y],
+			f32(font.baseSize),
+			font_spacing,
+		)
 	}
 	defer delete(wf_ytick_text)
 	defer delete(wf_ytick_meas)
@@ -789,7 +822,7 @@ main :: proc() {
 				keybindings_cstr,
 				rl.Vector2{10, 10},
 				f32(font.baseSize),
-				0.0,
+				font_spacing,
 				text_color,
 			)
 
@@ -799,7 +832,7 @@ main :: proc() {
 				fps_cstr,
 				rl.Vector2{f32(WINDOW_WIDTH - 100), f32(10)},
 				f32(font.baseSize),
-				0.0,
+				font_spacing,
 				rl.GRAY,
 			)
 
@@ -825,7 +858,7 @@ main :: proc() {
 				dbfs_orig,
 				-90,
 				f32(font.baseSize),
-				0.0,
+				font_spacing,
 				text_color,
 			)
 
@@ -851,7 +884,7 @@ main :: proc() {
 						xtick_lower.y + xtick_text_len[x].y / 2,
 					},
 					f32(font.baseSize),
-					0.0,
+					font_spacing,
 					tick_color,
 				)
 				// vertical grid
@@ -874,7 +907,7 @@ main :: proc() {
 					xtick_lower.y + xaxis_unit_len.y / 2,
 				},
 				f32(font.baseSize),
-				0.0,
+				font_spacing,
 				text_color,
 			)
 
@@ -901,7 +934,7 @@ main :: proc() {
 						ytick_left.y - spec_ytick_text_len[y].y / 2,
 					},
 					f32(font.baseSize),
-					0.0,
+					font_spacing,
 					tick_color,
 				)
 				// tick
@@ -946,7 +979,7 @@ main :: proc() {
 						ytick_left.y - wf_ytick_meas[y].y / 2,
 					},
 					f32(font.baseSize),
-					0.0,
+					font_spacing,
 					tick_color,
 				)
 				// tick
@@ -972,7 +1005,7 @@ main :: proc() {
 				s_orig,
 				-90,
 				f32(font.baseSize),
-				0.0,
+				font_spacing,
 				text_color,
 			)
 

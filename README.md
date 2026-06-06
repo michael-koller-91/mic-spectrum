@@ -18,15 +18,11 @@ make release
 
 ## Start the application
 
-Start the application
 ```console
 ./mic-spectrum
 ```
 
-## Keybindings
+# Font
 
-```console
-[space]: as long as it is pressed, the microphone is capturing
-[a]: scale the spectrum's y-axis to fit the current minimum and maximum
-[r]: reset the sepctrum's y-axis
-[esc]: exit
+The [font](./DMMono-Regular.ttf) is from [openfont.org](https://openfont.org/), available under MIT license.
+
