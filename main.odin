@@ -28,7 +28,7 @@ import "core:time"
 import ma "vendor:miniaudio"
 import rl "vendor:raylib"
 
-CHAN_CAPACITY :: 5
+CHAN_CAPACITY :: 5 // capacity of the channels between the threads
 FFT_SIZE_R :: 4096
 FFT_SIZE_C :: FFT_SIZE_R / 2 + 1
 WINDOW_HEIGHT :: 800
@@ -536,21 +536,23 @@ main :: proc() {
 	h2: i32 = (WINDOW_HEIGHT - h1) / 2
 	h3: i32 = WINDOW_HEIGHT - h2 - h1
 
+	// colors
 	grid_color :: rl.Color{100, 100, 100, 180}
 	plot_bg_color := rl.Color{40, 40, 40, 255}
+	spec_line_color :: rl.Color{250, 240, 0, 255}
+	spec_pixel_color :: rl.Color{250, 200, 0, 255}
 	text_color :: rl.WHITE
 	tick_color :: text_color
+
 	tick_len: f32 = 10
 	yaxis_unit_x: i32 = 30
 
+	// spectrum
 	spec_x: i32 = 100 // offset from left to where spectrum starts
 	spec_y: i32 = h1 + 20 // offset from top to where spectrum starts
 	spec_h: i32 = h2 - 40
 	spec_w: i32 = WINDOW_WIDTH - spec_x - 80
 	spec_rec := rl.Rectangle{f32(spec_x), f32(spec_y), f32(spec_w), f32(spec_h)}
-
-	spec_line_color :: rl.Color{250, 240, 0, 255}
-	spec_pixel_color :: rl.Color{250, 200, 0, 255}
 
 	spec_yaxis_unit_cstr := strings.clone_to_cstring("[dBFS]")
 	defer delete(spec_yaxis_unit_cstr)
@@ -851,12 +853,43 @@ main :: proc() {
 				text_color,
 			)
 
-			/* lower horizontal splitter */
-			rl.DrawLineV(
-				rl.Vector2{0, f32(h1 + h2)},
-				rl.Vector2{WINDOW_WIDTH, f32(h1 + h2)},
-				rl.WHITE,
-			)
+			/* spectrum y-axis labels */
+			ytick_left: rl.Vector2 = {f32(spec_x) - tick_len / 2, 0}
+			ytick_right: rl.Vector2 = {f32(spec_x) + tick_len / 2, 0}
+			for y in 0 ..< spec_ytick_num {
+				ytick_left.y = f32(spec_y) + f32(y) * f32(spec_h) / f32(spec_ytick_num - 1)
+				ytick_right.y = f32(spec_y) + f32(y) * f32(spec_h) / f32(spec_ytick_num - 1)
+				// horizontal grid
+				rl.DrawLine(
+					spec_x,
+					i32(ytick_left.y),
+					spec_x + spec_w,
+					i32(ytick_left.y),
+					grid_color,
+				)
+				// text
+				rl.DrawTextEx(
+					font,
+					spec_ytick_text[y],
+					rl.Vector2 {
+						ytick_left.x - spec_ytick_text_len[y].x - f32(font.baseSize) / 2,
+						ytick_left.y - spec_ytick_text_len[y].y / 2,
+					},
+					f32(font.baseSize),
+					font_spacing,
+					tick_color,
+				)
+				// tick
+				rl.DrawLineV(ytick_left, ytick_right, tick_color)
+			}
+
+			/* spectrum */
+			// scatter all pixels
+			for i in 0 ..< FFT_SIZE_C {
+				rl.DrawPixelV(plot_pixels[i], spec_pixel_color)
+			}
+			// average line plot
+			rl.DrawLineStrip(plot_line_pts, plot_line_pts_count, spec_line_color)
 
 			/* horizontal axis text, grid, tick */
 			xtick_lower: rl.Vector2 = {0, f32(h1 + h2) + tick_len / 2}
@@ -900,43 +933,12 @@ main :: proc() {
 				text_color,
 			)
 
-			/* spectrum y-axis labels */
-			ytick_left: rl.Vector2 = {f32(spec_x) - tick_len / 2, 0}
-			ytick_right: rl.Vector2 = {f32(spec_x) + tick_len / 2, 0}
-			for y in 0 ..< spec_ytick_num {
-				ytick_left.y = f32(spec_y) + f32(y) * f32(spec_h) / f32(spec_ytick_num - 1)
-				ytick_right.y = f32(spec_y) + f32(y) * f32(spec_h) / f32(spec_ytick_num - 1)
-				// horizontal grid
-				rl.DrawLine(
-					spec_x,
-					i32(ytick_left.y),
-					spec_x + spec_w,
-					i32(ytick_left.y),
-					grid_color,
-				)
-				// text
-				rl.DrawTextEx(
-					font,
-					spec_ytick_text[y],
-					rl.Vector2 {
-						ytick_left.x - spec_ytick_text_len[y].x - f32(font.baseSize) / 2,
-						ytick_left.y - spec_ytick_text_len[y].y / 2,
-					},
-					f32(font.baseSize),
-					font_spacing,
-					tick_color,
-				)
-				// tick
-				rl.DrawLineV(ytick_left, ytick_right, tick_color)
-			}
-
-			/* spectrum */
-			// scatter all pixels
-			for i in 0 ..< FFT_SIZE_C {
-				rl.DrawPixelV(plot_pixels[i], spec_pixel_color)
-			}
-			// average line plot
-			rl.DrawLineStrip(plot_line_pts, plot_line_pts_count, spec_line_color)
+			/* lower horizontal splitter */
+			rl.DrawLineV(
+				rl.Vector2{0, f32(h1 + h2)},
+				rl.Vector2{WINDOW_WIDTH, f32(h1 + h2)},
+				rl.WHITE,
+			)
 
 			/* box behind waterfall */
 			rl.DrawRectangle(wf_x, wf_y, rt_wf.texture.width, rt_wf.texture.height, plot_bg_color)
