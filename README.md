@@ -1,6 +1,7 @@
 # Microphone Spectrum
 
 Show your microphone's spectrum and a corresponding waterfall.
+(The screenshot shows bird chirps.)
 
 <div align="center">
   <img src="screenshot.png">
