@@ -8,7 +8,10 @@ package main
   * is the frequency axis correct if NUM_CHANNELS > 2?
   * check for worker task memory leaks
   * check if h1, h2, h3 are only used as f32
-  * replace rl.MeasreText with rl.MeasureTextEx
+*/
+
+/*NOTE:
+  * anything font-related needs to be called after rl.InitWindow
 */
 
 MEMTRACK :: #config(MEMTRACK, false)
@@ -507,6 +510,7 @@ main :: proc() {
 	/* ------------------------- rl related ------------------------- */
 	rl_fps: i32 = 30
 
+	font_spacing: f32 = 0
 	font_cstr := strings.clone_to_cstring("DMMono-Regular.ttf")
 	defer delete(font_cstr)
 
@@ -548,7 +552,7 @@ main :: proc() {
 	rl.InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Microphone Spectrum")
 	defer rl.CloseWindow()
 
-	font := rl.LoadFontEx(font_cstr, 21, nil, 0) // needs to be called after rl.InitWindow
+	font := rl.LoadFontEx(font_cstr, 21, nil, 0)
 	defer rl.UnloadFont(font)
 	if !rl.IsFontValid(font) {
 		font = rl.GetFontDefault()
@@ -557,13 +561,13 @@ main :: proc() {
 
 	xtick_num: i32 = 10
 	xtick_text := make([]cstring, xtick_num)
-	xtick_text_len := make([]f32, xtick_num)
+	xtick_text_len := make([]rl.Vector2, xtick_num)
 	for x in 0 ..< xtick_num {
 		frequency := f32(x) * f32(SAMPLE_RATE) / 2 / f32(xtick_num - 1)
 		t := fmt.aprintf("%.0f", frequency)
 		xtick_text[x] = strings.clone_to_cstring(t)
 		delete(t)
-		xtick_text_len[x] = f32(rl.MeasureText(xtick_text[x], font.baseSize)) // needs to be called after rl.InitWindow
+		xtick_text_len[x] = rl.MeasureTextEx(font, xtick_text[x], f32(font.baseSize), font_spacing)
 	}
 	defer delete(xtick_text)
 	defer delete(xtick_text_len)
@@ -573,17 +577,23 @@ main :: proc() {
 
 	xaxis_unit_cstr := strings.clone_to_cstring("[Hz]")
 	defer delete(xaxis_unit_cstr)
+	xaxis_unit_len := rl.MeasureTextEx(font, xaxis_unit_cstr, f32(font.baseSize), font_spacing)
 
 	spec_ytick_num: i32 = 5
 	spec_ytick_text := make([]cstring, spec_ytick_num)
-	spec_ytick_text_len := make([]f32, spec_ytick_num)
+	spec_ytick_text_len := make([]rl.Vector2, spec_ytick_num)
 	for y in 0 ..< spec_ytick_num {
 		yy := spec_ytick_num - 1 - y
 		db := f32(y) * (mag_max_default - mag_min_default) + mag_min_default
 		t := fmt.aprintf("%.0f", db)
 		spec_ytick_text[yy] = strings.clone_to_cstring(t)
 		delete(t)
-		spec_ytick_text_len[yy] = f32(rl.MeasureText(spec_ytick_text[yy], font.baseSize)) // needs to be called after rl.InitWindow
+		spec_ytick_text_len[yy] = rl.MeasureTextEx(
+			font,
+			spec_ytick_text[yy],
+			f32(font.baseSize),
+			font_spacing,
+		)
 	}
 	defer delete(spec_ytick_text)
 	defer delete(spec_ytick_text_len)
@@ -712,9 +722,13 @@ main :: proc() {
 					delete(spec_ytick_text[yy])
 					spec_ytick_text[yy] = strings.clone_to_cstring(t)
 					delete(t)
-					spec_ytick_text_len[yy] = f32(
-						rl.MeasureText(spec_ytick_text[yy], font.baseSize),
+					spec_ytick_text_len[yy] = rl.MeasureTextEx(
+						font,
+						spec_ytick_text[yy],
+						f32(font.baseSize),
+						font_spacing,
 					)
+
 				}
 				update_ylabels = false
 			}
@@ -796,10 +810,14 @@ main :: proc() {
 			rl.DrawRectangleRec(spec_rec, plot_bg_color)
 
 			/* [dBFS] */
-			dbfs_orig := rl.Vector2 {
-				f32(rl.MeasureText(spec_yaxis_unit_cstr, font.baseSize)) / 2,
-				f32(font.baseSize) / 2,
-			}
+			dbfs_orig := rl.MeasureTextEx(
+				font,
+				spec_yaxis_unit_cstr,
+				f32(font.baseSize),
+				font_spacing,
+			)
+			dbfs_orig.x /= 2
+			dbfs_orig.y /= 2
 			rl.DrawTextPro(
 				font,
 				spec_yaxis_unit_cstr,
@@ -829,8 +847,8 @@ main :: proc() {
 					font,
 					xtick_text[x],
 					rl.Vector2 {
-						xtick_lower.x - xtick_text_len[x] / 2,
-						xtick_lower.y + f32(font.baseSize) / 2,
+						xtick_lower.x - xtick_text_len[x].x / 2,
+						xtick_lower.y + xtick_text_len[x].y / 2,
 					},
 					f32(font.baseSize),
 					0.0,
@@ -852,8 +870,8 @@ main :: proc() {
 				font,
 				xaxis_unit_cstr,
 				rl.Vector2 {
-					f32(WINDOW_WIDTH) - 1.4 * f32(rl.MeasureText(xaxis_unit_cstr, font.baseSize)),
-					xtick_lower.y + f32(font.baseSize) / 2.0,
+					f32(WINDOW_WIDTH) - 1.4 * xaxis_unit_len.x,
+					xtick_lower.y + xaxis_unit_len.y / 2,
 				},
 				f32(font.baseSize),
 				0.0,
@@ -879,8 +897,8 @@ main :: proc() {
 					font,
 					spec_ytick_text[y],
 					rl.Vector2 {
-						ytick_left.x - spec_ytick_text_len[y] - f32(font.baseSize) / 2,
-						ytick_left.y - f32(font.baseSize) / 2,
+						ytick_left.x - spec_ytick_text_len[y].x - f32(font.baseSize) / 2,
+						ytick_left.y - spec_ytick_text_len[y].y / 2,
 					},
 					f32(font.baseSize),
 					0.0,
@@ -944,10 +962,9 @@ main :: proc() {
 
 			/* [s] */
 			s_pos := rl.Vector2{f32(yaxis_unit_x), f32(wf_yaxis_unit_y)}
-			s_orig := rl.Vector2 {
-				f32(rl.MeasureText(wf_yaxis_unit_cstr, font.baseSize)) / 2,
-				f32(font.baseSize) / 2,
-			}
+			s_orig := rl.MeasureTextEx(font, wf_yaxis_unit_cstr, f32(font.baseSize), font_spacing)
+			s_orig.x /= 2
+			s_orig.y /= 2
 			rl.DrawTextPro(
 				font,
 				wf_yaxis_unit_cstr,
