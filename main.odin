@@ -1,15 +1,18 @@
 package main
 
-/* TODO:
-  * vertical grid seems to be off by one pixel
-  * single spectrum pixels can be one pixel below lowest horizontal line
-*/
-
 /*NOTE:
-  * anything font-related needs to be called after rl.InitWindow
-  * anything texture-related needs to be called after rl.InitWindow
   * averaging the channels does not seem to be a good idea (at least with my mic), so 1 channel for now
     * some kind of phase alignment prior to averaging would be necessary
+*/
+
+/* NOTE: (raylib (oddities))
+  * anything font-related needs to be called after rl.InitWindow
+  * anything texture-related needs to be called after rl.InitWindow
+  * rl.DrawLineV(rl.Vector2{0, 0}, rl.Vector2{WINDOW_WIDTH, 0}, rl.WHITE) // is not visible
+  * rl.DrawLineV(rl.Vector2{0, 1}, rl.Vector2{WINDOW_WIDTH, 1}, rl.WHITE) // draws the top-most row
+  * rl.DrawLineV(rl.Vector2{1, 1}, rl.Vector2{WINDOW_WIDTH, 1}, rl.WHITE) // draws the top-most row - except for the left-post pixel
+  * rl.DrawPixel(0, 0, rl.WHITE) // is the left-most pixel in the top-most row
+  * rl.DrawRectangleRec(rl.Rectangle{1, 1, WINDOW_WIDTH, 10}, rl.LIGHTGRAY) // leaves the first row and first column empty
 */
 
 MEMTRACK :: #config(MEMTRACK, false)
@@ -552,7 +555,7 @@ main :: proc() {
 	spec_y: i32 = h1 + 20 // offset from top to where spectrum starts
 	spec_h: i32 = h2 - 40
 	spec_w: i32 = WINDOW_WIDTH - spec_x - 80
-	spec_rec := rl.Rectangle{f32(spec_x), f32(spec_y), f32(spec_w), f32(spec_h)}
+	spec_rec := rl.Rectangle{f32(spec_x - 1), f32(spec_y - 1), f32(spec_w), f32(spec_h)} // see raylib NOTE for the "-1"
 
 	spec_yaxis_unit_cstr := strings.clone_to_cstring("[dBFS]")
 	defer delete(spec_yaxis_unit_cstr)
@@ -895,8 +898,9 @@ main :: proc() {
 			xtick_lower: rl.Vector2 = {0, f32(h1 + h2) + tick_len / 2}
 			xtick_upper: rl.Vector2 = {0, f32(h1 + h2) - tick_len / 2}
 			for x in 0 ..< xtick_num {
-				xtick_lower.x = f32(spec_x) + f32(x) * f32(spec_w) / f32(xtick_num - 1)
-				xtick_upper.x = f32(spec_x) + f32(x) * f32(spec_w) / f32(xtick_num - 1)
+				// floor because i32() floors
+				xtick_lower.x = math.floor(f32(spec_x) + f32(x) * f32(spec_w) / f32(xtick_num - 1))
+				xtick_upper.x = math.floor(f32(spec_x) + f32(x) * f32(spec_w) / f32(xtick_num - 1))
 				// text
 				rl.DrawTextEx(
 					font,
